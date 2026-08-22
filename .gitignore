@@ -111,3 +111,6 @@ docker-compose.override.yml
 # ============================================================
 
 .pre-commit-cache/
+
+# Python packaging artifacts
+agent/*.egg-info/

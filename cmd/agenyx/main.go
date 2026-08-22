@@ -1,7 +1,5 @@
+// Command agenyx is the entrypoint for the Agenyx service.
 package main
 
-import "fmt"
-
 func main() {
-	fmt.Println("Agenyx runtime starting...")
 }
