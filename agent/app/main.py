@@ -1,12 +1,14 @@
 from fastapi import FastAPI
 
 from app.agent_runtime.runtime import AgentRuntime
+from app.api.errors import agenyx_error_handler
 from app.api.routes import create_router
 from app.core.config import get_settings
-from app.llm.openai_compatible import OpenAICompatibleProvider
-from app.tools.builtin import create_tool_registry
-from app.api.errors import agenyx_error_handler
 from app.core.errors import AgenyxError
+from app.llm.openai_compatible import OpenAICompatibleProvider
+from app.sandbox.client import ToolSandboxClient
+from app.tools.builtin import create_tool_registry
+
 
 settings = get_settings()
 
@@ -19,18 +21,27 @@ llm = OpenAICompatibleProvider(
     max_retries=settings.llm_max_retries,
 )
 
+
 tools = create_tool_registry()
+
+
+sandbox = ToolSandboxClient(
+    socket_path="/sandbox/tool.sock",
+    timeout_seconds=10.0,
+)
 
 
 runtime = AgentRuntime(
     llm=llm,
     tools=tools,
     max_steps=settings.agent_max_steps,
+    sandbox=sandbox,
 )
 
 
 def get_runtime() -> AgentRuntime:
     """Return the configured agent runtime."""
+
     return runtime
 
 
@@ -38,13 +49,14 @@ app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
 )
+
+
 app.add_exception_handler(
     AgenyxError,
     agenyx_error_handler,
 )
 
 
-
 app.include_router(
-    create_router(get_runtime)
+    create_router(get_runtime),
 )

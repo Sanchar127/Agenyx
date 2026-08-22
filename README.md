@@ -106,3 +106,23 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 ## Status
 
 This project is under active development. APIs and architecture may change without notice until the first tagged release.
+
+## gVisor Sandbox
+
+Agenyx uses gVisor (`runsc`) to isolate tool execution.
+
+Linux developers must run:
+
+./scripts/setup-gvisor.sh
+
+The script installs and configures the gVisor runtime for Docker.
+
+Verify:
+
+docker info | grep -A10 Runtimes
+
+`runsc` should appear in the available Docker runtimes.
+
+Then start Agenyx:
+
+docker compose up -d --build

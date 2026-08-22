@@ -1,7 +1,7 @@
 services:
 
   # ─────────────────────────────────────────────
-  # Agent - actual LLM/tool execution service
+  # Agent - LLM reasoning and orchestration
   # ─────────────────────────────────────────────
   agent:
     build:
@@ -18,9 +18,49 @@ services:
     expose:
       - "8000"
 
+    volumes:
+      - sandbox_socket:/sandbox
+
+    depends_on:
+      - sandbox
+
     restart: unless-stopped
 
 
+    # ─────────────────────────────────────────────
+  # Sandbox - gVisor-isolated tool execution
+  # ─────────────────────────────────────────────
+  sandbox:
+      build:
+        context: ./sandbox
+
+      container_name: agenyx-sandbox
+
+      runtime: runsc
+      network_mode: none
+
+      volumes:
+        - sandbox_socket:/sandbox
+
+      environment:
+        SANDBOX_SOCKET_PATH: /sandbox/tool.sock
+
+      read_only: true
+
+      cap_drop:
+        - ALL
+
+      security_opt:
+        - no-new-privileges:true
+
+      mem_limit: 256m
+      cpus: "0.5"
+      pids_limit: 64
+
+      tmpfs:
+        - /tmp:size=16m,mode=1777
+
+      restart: unless-stopped
   # ─────────────────────────────────────────────
   # Orchestrator - accepts requests and queues jobs
   # ─────────────────────────────────────────────
@@ -70,6 +110,7 @@ services:
 
     restart: unless-stopped
 
+
   # ─────────────────────────────────────────────
   # Valkey - task queue / execution state
   # ─────────────────────────────────────────────
@@ -113,3 +154,5 @@ services:
 
 volumes:
   valkey_data:
+
+  sandbox_socket:
