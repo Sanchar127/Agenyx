@@ -17,6 +17,11 @@ class Settings(BaseSettings):
 
     agent_max_steps: int = 8
 
+    jwt_secret: str
+    jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "agenyx"
+    jwt_audience: str = "agenyx-api"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="AGENTYX_",

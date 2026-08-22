@@ -114,3 +114,8 @@ docker-compose.override.yml
 
 # Python packaging artifacts
 agent/*.egg-info/
+
+# TLS development certificates
+gateway/certs/*.key
+gateway/certs/*.crt
+gateway/certs/*.pem
