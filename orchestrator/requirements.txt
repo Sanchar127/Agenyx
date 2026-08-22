@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+valkey
+httpx2
+pytest
+pytest-asyncio

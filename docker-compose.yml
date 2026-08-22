@@ -1,25 +1,115 @@
 services:
+
+  # ─────────────────────────────────────────────
+  # Agent - actual LLM/tool execution service
+  # ─────────────────────────────────────────────
   agent:
     build:
       context: ./agent
+
     container_name: agenyx-agent
+
     env_file:
       - ./agent/.env
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
     expose:
       - "8000"
+
     restart: unless-stopped
 
+
+  # ─────────────────────────────────────────────
+  # Orchestrator - accepts requests and queues jobs
+  # ─────────────────────────────────────────────
+  orchestrator:
+    build:
+      context: ./orchestrator
+
+    container_name: agenyx-orchestrator
+
+    environment:
+      AGENTYX_VALKEY_URL: redis://valkey:6379/0
+      AGENTYX_TASK_STREAM: agenyx:tasks
+      AGENTYX_CONSUMER_GROUP: agenyx-workers
+      AGENTYX_AGENT_URL: http://agent:8000
+
+    depends_on:
+      - valkey
+      - agent
+
+    ports:
+      - "8001:8001"
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────────────────────
+  # Worker - consumes tasks from Valkey
+  # ─────────────────────────────────────────────
+  worker:
+    build:
+      context: ./worker
+
+    container_name: agenyx-worker
+
+    volumes:
+      - ./worker:/app
+
+    environment:
+      AGENTYX_VALKEY_URL: redis://valkey:6379/0
+      AGENTYX_TASK_STREAM: agenyx:tasks
+      AGENTYX_CONSUMER_GROUP: agenyx-workers
+      AGENTYX_AGENT_URL: http://agent:8000
+
+    depends_on:
+      - valkey
+      - agent
+
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────────
+  # Valkey - task queue / execution state
+  # ─────────────────────────────────────────────
+  valkey:
+    image: valkey/valkey:9-alpine
+
+    container_name: agenyx-valkey
+
+    command:
+      - valkey-server
+      - --appendonly
+      - "yes"
+
+    volumes:
+      - valkey_data:/data
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────────────────────
+  # Gateway - single external entry point
+  # ─────────────────────────────────────────────
   gateway:
     image: nginx:1.29-alpine
+
     container_name: agenyx-gateway
+
     depends_on:
-      - agent
+      - orchestrator
+
     ports:
       - "8080:80"
       - "8443:443"
+
     volumes:
       - ./gateway/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./gateway/certs:/etc/nginx/certs:ro
+
     restart: unless-stopped
+
+
+volumes:
+  valkey_data:
