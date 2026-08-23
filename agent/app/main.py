@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fastapi import FastAPI
 
 from app.agent_runtime.runtime import AgentRuntime
@@ -9,7 +11,7 @@ from app.llm.openai_compatible import OpenAICompatibleProvider
 from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
 
-
+from contextlib import asynccontextmanager
 settings = get_settings()
 
 
@@ -26,8 +28,8 @@ tools = create_tool_registry()
 
 
 sandbox = ToolSandboxClient(
-    socket_path="/sandbox/tool.sock",
-    timeout_seconds=10.0,
+    base_url=settings.sandbox_base_url,
+    timeout_seconds=settings.sandbox_timeout_seconds,
 )
 
 
@@ -44,6 +46,13 @@ def get_runtime() -> AgentRuntime:
 
     return runtime
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+
+    await llm.close()
+    await sandbox.close()
 
 app = FastAPI(
     title=settings.app_name,

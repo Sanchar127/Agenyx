@@ -22,12 +22,33 @@ class OpenAICompatibleProvider(LLMProvider):
         model: str,
         timeout: float,
         max_retries: int = 2,
+        max_connections: int = 100,
+        max_keepalive_connections: int = 20,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
+
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=min(timeout, 10.0),
+                read=timeout,
+                write=timeout,
+                pool=timeout,
+            ),
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+            ),
+        )
+
+    async def close(self) -> None:
+        """Close the underlying HTTP connection pool."""
+
+        if not self._client.is_closed:
+            await self._client.aclose()
 
     async def complete(
         self,
@@ -103,23 +124,22 @@ class OpenAICompatibleProvider(LLMProvider):
         headers: dict[str, str],
     ) -> dict[str, Any]:
 
+        url = f"{self.base_url}/chat/completions"
+
         logger.info(
             "llm_http_request "
             "url=%s model=%s tools=%s",
-            f"{self.base_url}/chat/completions",
+            url,
             self.model,
             len(payload.get("tools", [])),
         )
 
         try:
-            async with httpx.AsyncClient(
-                timeout=self.timeout,
-            ) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                )
+            response = await self._client.post(
+                url,
+                json=payload,
+                headers=headers,
+            )
 
         except httpx.ConnectError as exc:
             logger.error(
@@ -198,76 +218,83 @@ class OpenAICompatibleProvider(LLMProvider):
                 "LLM returned invalid JSON"
             ) from exc
 
-        logger.info(
-            "llm_response_received response=%s",
-            data,
-        )
+        self._log_response(data)
+
+        return data
+
+    @staticmethod
+    def _log_response(
+        data: dict[str, Any],
+    ) -> None:
 
         try:
             choices = data.get("choices", [])
 
-            if choices:
-                message = choices[0].get(
-                    "message",
-                    {},
+            if not choices:
+                logger.warning(
+                    "llm_response_missing_choices",
                 )
+                return
 
-                tool_calls = message.get(
-                    "tool_calls",
-                    [],
+            message = choices[0].get(
+                "message",
+                {},
+            )
+
+            tool_calls = message.get(
+                "tool_calls",
+                [],
+            )
+
+            content = message.get(
+                "content",
+            )
+
+            logger.info(
+                "llm_response_parsed "
+                "has_content=%s "
+                "content_length=%s "
+                "tool_calls=%s",
+                isinstance(content, str),
+                len(content) if isinstance(
+                    content,
+                    str,
                 )
-
-                content = message.get(
-                    "content",
+                else 0,
+                len(tool_calls)
+                if isinstance(
+                    tool_calls,
+                    list,
                 )
+                else 0,
+            )
 
+            if tool_calls:
                 logger.info(
-                    "llm_response_parsed "
-                    "has_content=%s "
-                    "content_length=%s "
-                    "tool_calls=%s",
-                    isinstance(content, str),
-                    len(content) if isinstance(
-                        content,
-                        str,
-                    ) else 0,
-                    len(tool_calls)
-                    if isinstance(
-                        tool_calls,
-                        list,
-                    )
-                    else 0,
+                    "llm_tool_calls_received "
+                    "tools=%s",
+                    [
+                        call.get(
+                            "function",
+                            {},
+                        ).get(
+                            "name",
+                        )
+                        for call in tool_calls
+                        if isinstance(
+                            call,
+                            dict,
+                        )
+                    ],
                 )
-
-                if tool_calls:
-                    logger.info(
-                        "llm_tool_calls_received "
-                        "tools=%s",
-                        [
-                            call.get(
-                                "function",
-                                {},
-                            ).get(
-                                "name",
-                            )
-                            for call in tool_calls
-                            if isinstance(
-                                call,
-                                dict,
-                            )
-                        ],
-                    )
-
-                else:
-                    logger.info(
-                        "llm_no_tool_calls "
-                        "content=%s",
-                        content,
-                    )
+            else:
+                logger.info(
+                    "llm_no_tool_calls "
+                    "content=%s",
+                    content,
+                )
 
         except Exception:
             logger.exception(
                 "llm_response_logging_failed",
             )
-
-        return data

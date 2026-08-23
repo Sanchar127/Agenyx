@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import json
 from typing import Any
 
+import httpx
+
 from app.sandbox.errors import (
-    SandboxError,
     SandboxProtocolError,
     SandboxToolError,
     SandboxUnavailableError,
@@ -18,101 +17,66 @@ class ToolSandboxClient:
     def __init__(
         self,
         *,
-        socket_path: str = "/sandbox/tool.sock",
+        base_url: str,
         timeout_seconds: float = 10.0,
     ) -> None:
-        self.socket_path = socket_path
+        self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+
+        self.client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(
+                timeout_seconds,
+                connect=2.0,
+            ),
+        )
 
     async def execute(
         self,
         name: str,
         arguments: dict[str, Any],
     ) -> str:
-        """Execute a tool through the sandbox."""
-
         request = {
             "tool": name,
             "arguments": arguments,
         }
 
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_unix_connection(
-                    self.socket_path,
-                ),
-                timeout=self.timeout_seconds,
+            response = await self.client.post(
+                "/execute",
+                json=request,
             )
 
-        except (
-            OSError,
-            asyncio.TimeoutError,
-        ) as exc:
+        except httpx.ConnectError as exc:
             raise SandboxUnavailableError(
                 "Sandbox is unavailable"
             ) from exc
 
-        try:
-            payload = json.dumps(
-                request,
-                separators=(",", ":"),
-            ).encode("utf-8") + b"\n"
-
-            writer.write(payload)
-
-            await asyncio.wait_for(
-                writer.drain(),
-                timeout=self.timeout_seconds,
-            )
-
-            raw_response = await asyncio.wait_for(
-                reader.readline(),
-                timeout=self.timeout_seconds,
-            )
-
-        except asyncio.TimeoutError as exc:
+        except httpx.TimeoutException as exc:
             raise SandboxUnavailableError(
                 "Sandbox request timed out"
             ) from exc
 
-        except OSError as exc:
+        except httpx.HTTPError as exc:
             raise SandboxUnavailableError(
                 "Sandbox connection failed"
             ) from exc
 
-        finally:
-            writer.close()
-
-            try:
-                await writer.wait_closed()
-            except OSError:
-                pass
-
-        if not raw_response:
-            raise SandboxProtocolError(
-                "Sandbox returned an empty response"
-            )
-
         try:
-            response = json.loads(
-                raw_response.decode("utf-8"),
-            )
+            payload = response.json()
 
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-        ) as exc:
+        except ValueError as exc:
             raise SandboxProtocolError(
                 "Sandbox returned invalid JSON"
             ) from exc
 
-        if not isinstance(response, dict):
+        if not isinstance(payload, dict):
             raise SandboxProtocolError(
                 "Sandbox response must be an object"
             )
 
-        if response.get("ok") is True:
-            result = response.get("result")
+        if payload.get("ok") is True:
+            result = payload.get("result")
 
             if not isinstance(result, str):
                 raise SandboxProtocolError(
@@ -121,9 +85,12 @@ class ToolSandboxClient:
 
             return result
 
-        error = response.get("error")
+        error = payload.get("error")
 
         if not isinstance(error, str):
             error = "Sandbox tool execution failed"
 
         raise SandboxToolError(error)
+
+    async def close(self) -> None:
+        await self.client.aclose()

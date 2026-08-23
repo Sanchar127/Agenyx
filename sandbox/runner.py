@@ -5,11 +5,15 @@ import asyncio
 import json
 import logging
 import operator
-import os
-import signal
-from pathlib import Path
 from typing import Any
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+
+# ─────────────────────────────────────────────
+# Logging
+# ─────────────────────────────────────────────
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,14 +26,19 @@ logging.basicConfig(
 logger = logging.getLogger("sandbox")
 
 
-SOCKET_PATH = os.getenv(
-    "SANDBOX_SOCKET_PATH",
-    "/sandbox/tool.sock",
-)
+# ─────────────────────────────────────────────
+# Limits
+# ─────────────────────────────────────────────
 
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
+MAX_TOOL_EXECUTION_SECONDS = 5.0
+MAX_EXPRESSION_LENGTH = 1024
 
+
+# ─────────────────────────────────────────────
+# Calculator
+# ─────────────────────────────────────────────
 
 _OPERATORS = {
     ast.Add: operator.add,
@@ -47,7 +56,7 @@ def calculator(expression: str) -> str:
             "expression must be a string"
         )
 
-    if len(expression) > 1024:
+    if len(expression) > MAX_EXPRESSION_LENGTH:
         raise ValueError(
             "expression is too long"
         )
@@ -65,20 +74,18 @@ def calculator(expression: str) -> str:
 
     def evaluate(
         node: ast.AST,
-    ) -> float:
-        if isinstance(
-            node,
-            ast.Constant,
-        ) and isinstance(
-            node.value,
-            (int, float),
+    ) -> int | float:
+
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(
+                node.value,
+                (int, float),
+            )
         ):
             return node.value
 
-        if isinstance(
-            node,
-            ast.BinOp,
-        ):
+        if isinstance(node, ast.BinOp):
             operation = _OPERATORS.get(
                 type(node.op),
             )
@@ -101,6 +108,10 @@ def calculator(expression: str) -> str:
         evaluate(tree.body),
     )
 
+
+# ─────────────────────────────────────────────
+# Tool registry
+# ─────────────────────────────────────────────
 
 TOOLS = {
     "calculator": calculator,
@@ -125,248 +136,238 @@ def execute_tool(
     )
 
 
-def build_response(
+# ─────────────────────────────────────────────
+# Response helpers
+# ─────────────────────────────────────────────
+
+def build_error(
     *,
-    ok: bool,
-    result: str | None = None,
-    error: str | None = None,
-) -> bytes:
-    response: dict[str, Any] = {
-        "ok": ok,
+    status_code: int,
+    error: str,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "ok": False,
+            "error": error,
+        },
+    )
+
+
+def response_size(
+    response: dict[str, Any],
+) -> int:
+    """Return serialized response size."""
+
+    return len(
+        json.dumps(
+            response,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+
+
+# ─────────────────────────────────────────────
+# FastAPI application
+# ─────────────────────────────────────────────
+
+app = FastAPI(
+    title="Agenyx Sandbox",
+    version="0.1.0",
+)
+
+
+# ─────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    """Sandbox liveness endpoint."""
+
+    return {
+        "status": "ok",
     }
 
-    if result is not None:
-        response["result"] = result
 
-    if error is not None:
-        response["error"] = error
+# ─────────────────────────────────────────────
+# Tool execution
+# ─────────────────────────────────────────────
 
-    payload = json.dumps(
-        response,
-        separators=(",", ":"),
-    ).encode("utf-8")
+@app.post("/execute")
+async def execute(
+    request: Request,
+) -> JSONResponse:
+    """Execute an allow-listed tool."""
 
-    if len(payload) > MAX_RESPONSE_BYTES:
-        payload = json.dumps(
-            {
-                "ok": False,
-                "error": "Sandbox response too large",
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
+    logger.info(
+        "sandbox_request_received",
+    )
 
-    return payload + b"\n"
+    # ─────────────────────────────────────────
+    # Request size protection
+    # ─────────────────────────────────────────
 
+    content_length = request.headers.get(
+        "content-length",
+    )
 
-async def handle_client(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-) -> None:
-    """Handle one sandbox request."""
+    if content_length is not None:
+
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return build_error(
+                    status_code=413,
+                    error="Sandbox request too large",
+                )
+
+        except ValueError:
+            return build_error(
+                status_code=400,
+                error="Invalid Content-Length",
+            )
 
     try:
-        raw_request = await asyncio.wait_for(
-            reader.readline(),
-            timeout=5.0,
-        )
-
-        if not raw_request:
-            return
-
-        if len(raw_request) > MAX_REQUEST_BYTES:
-            writer.write(
-                build_response(
-                    ok=False,
-                    error="Sandbox request too large",
-                ),
-            )
-            await writer.drain()
-            return
-
-        try:
-            request = json.loads(
-                raw_request.decode("utf-8"),
-            )
-
-        except (
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-        ):
-            writer.write(
-                build_response(
-                    ok=False,
-                    error="Invalid JSON request",
-                ),
-            )
-            await writer.drain()
-            return
-
-        if not isinstance(request, dict):
-            writer.write(
-                build_response(
-                    ok=False,
-                    error="Request must be an object",
-                ),
-            )
-            await writer.drain()
-            return
-
-        name = request.get("tool")
-        arguments = request.get(
-            "arguments",
-            {},
-        )
-
-        if not isinstance(name, str):
-            writer.write(
-                build_response(
-                    ok=False,
-                    error="Tool name must be a string",
-                ),
-            )
-            await writer.drain()
-            return
-
-        if not isinstance(arguments, dict):
-            writer.write(
-                build_response(
-                    ok=False,
-                    error="Tool arguments must be an object",
-                ),
-            )
-            await writer.drain()
-            return
-
-        logger.info(
-            "sandbox_tool_started tool=%s",
-            name,
-        )
-
-        try:
-            result = await asyncio.wait_for(
-                asyncio.to_thread(
-                    execute_tool,
-                    name,
-                    arguments,
-                ),
-                timeout=5.0,
-            )
-
-        except asyncio.TimeoutError:
-            writer.write(
-                build_response(
-                    ok=False,
-                    error="Tool execution timed out",
-                ),
-            )
-            await writer.drain()
-            return
-
-        except Exception as exc:
-            logger.exception(
-                "sandbox_tool_failed tool=%s",
-                name,
-            )
-
-            writer.write(
-                build_response(
-                    ok=False,
-                    error=str(exc),
-                ),
-            )
-            await writer.drain()
-            return
-
-        logger.info(
-            "sandbox_tool_completed tool=%s",
-            name,
-        )
-
-        writer.write(
-            build_response(
-                ok=True,
-                result=result,
-            ),
-        )
-
-        await writer.drain()
-
-    except asyncio.TimeoutError:
-        logger.warning(
-            "sandbox_client_timeout",
-        )
+        raw_body = await request.body()
 
     except Exception:
         logger.exception(
-            "sandbox_client_failed",
+            "sandbox_request_read_failed",
         )
 
-    finally:
-        writer.close()
+        return build_error(
+            status_code=400,
+            error="Unable to read request body",
+        )
 
-        try:
-            await writer.wait_closed()
-        except OSError:
-            pass
+    if len(raw_body) > MAX_REQUEST_BYTES:
+        return build_error(
+            status_code=413,
+            error="Sandbox request too large",
+        )
 
+    # ─────────────────────────────────────────
+    # Parse JSON
+    # ─────────────────────────────────────────
 
-async def main() -> None:
-    """Start the sandbox Unix socket server."""
+    try:
+        request_body = json.loads(
+            raw_body.decode("utf-8"),
+        )
 
-    socket = Path(SOCKET_PATH)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return build_error(
+            status_code=400,
+            error="Invalid JSON request",
+        )
 
-    socket.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+    # ─────────────────────────────────────────
+    # Validate request
+    # ─────────────────────────────────────────
+
+    if not isinstance(request_body, dict):
+        return build_error(
+            status_code=400,
+            error="Request must be an object",
+        )
+
+    name = request_body.get("tool")
+
+    arguments = request_body.get(
+        "arguments",
+        {},
+    )
+
+    if not isinstance(name, str):
+        return build_error(
+            status_code=400,
+            error="Tool name must be a string",
+        )
+
+    if not isinstance(arguments, dict):
+        return build_error(
+            status_code=400,
+            error="Tool arguments must be an object",
+        )
+
+    # ─────────────────────────────────────────
+    # Tool execution
+    # ─────────────────────────────────────────
+
+    logger.info(
+        "sandbox_tool_started tool=%s",
+        name,
     )
 
     try:
-        socket.unlink()
 
-    except FileNotFoundError:
-        pass
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                execute_tool,
+                name,
+                arguments,
+            ),
+            timeout=MAX_TOOL_EXECUTION_SECONDS,
+        )
 
-    server = await asyncio.start_unix_server(
-        handle_client,
-        path=SOCKET_PATH,
-    )
+    except asyncio.TimeoutError:
 
-    os.chmod(
-        SOCKET_PATH,
-        0o660,
-    )
+        logger.warning(
+            "sandbox_tool_timeout tool=%s",
+            name,
+        )
+
+        return build_error(
+            status_code=504,
+            error="Tool execution timed out",
+        )
+
+    except Exception as exc:
+
+        logger.exception(
+            "sandbox_tool_failed tool=%s",
+            name,
+        )
+
+        return build_error(
+            status_code=400,
+            error=str(exc),
+        )
+
+    # ─────────────────────────────────────────
+    # Build response
+    # ─────────────────────────────────────────
+
+    response = {
+        "ok": True,
+        "result": result,
+    }
+
+    # ─────────────────────────────────────────
+    # Response size protection
+    # ─────────────────────────────────────────
+
+    if response_size(response) > MAX_RESPONSE_BYTES:
+
+        logger.error(
+            "sandbox_response_too_large tool=%s",
+            name,
+        )
+
+        return build_error(
+            status_code=500,
+            error="Sandbox response too large",
+        )
 
     logger.info(
-        "sandbox_started socket=%s",
-        SOCKET_PATH,
+        "sandbox_tool_completed tool=%s",
+        name,
     )
 
-    stop_event = asyncio.Event()
-
-    def request_shutdown() -> None:
-        stop_event.set()
-
-    loop = asyncio.get_running_loop()
-
-    for sig in (
-        signal.SIGTERM,
-        signal.SIGINT,
-    ):
-        try:
-            loop.add_signal_handler(
-                sig,
-                request_shutdown,
-            )
-        except NotImplementedError:
-            pass
-
-    async with server:
-        await stop_event.wait()
-
-    logger.info(
-        "sandbox_stopped",
+    return JSONResponse(
+        status_code=200,
+        content=response,
     )
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
