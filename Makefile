@@ -1,24 +1,22 @@
-.PHONY: fmt lint test vet build run check clean
+.PHONY: build test test-race lint fmt vet bench
 
-fmt:
-	gofmt -w .
-
-lint:
-	golangci-lint run
+build:
+	go build ./...
 
 test:
 	go test ./...
 
+test-race:
+	go test -race ./...
+
+lint:
+	golangci-lint run ./...
+
+fmt:
+	gofmt -w .
+
 vet:
 	go vet ./...
 
-build:
-	go build -o bin/agenyx ./cmd/agenyx
-
-run:
-	go run ./cmd/agenyx
-
-check: fmt lint vet test
-
-clean:
-	rm -rf bin/
+bench:
+	go test -bench=. -benchmem ./tests/benchmarks/...
