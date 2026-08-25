@@ -1,29 +1,43 @@
 import asyncio
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
 
 
 class InferenceBackend(ABC):
+    """Abstract interface for an inference backend."""
 
     @abstractmethod
     async def chat_completion(
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """Execute a non-streaming chat completion request."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def chat_completion_stream(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[bytes]:
+        """Execute a streaming chat completion request."""
         raise NotImplementedError
 
     @abstractmethod
     async def health(self) -> bool:
+        """Check whether the inference backend is available."""
         raise NotImplementedError
 
     @abstractmethod
     async def close(self) -> None:
+        """Close backend resources."""
         raise NotImplementedError
 
 
 class OpenAICompatibleBackend(InferenceBackend):
+    """HTTP client for an OpenAI-compatible inference backend."""
 
     def __init__(
         self,
@@ -35,7 +49,6 @@ class OpenAICompatibleBackend(InferenceBackend):
         max_keepalive_connections: int,
         max_retries: int = 2,
     ) -> None:
-
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.max_retries = max_retries
@@ -53,31 +66,36 @@ class OpenAICompatibleBackend(InferenceBackend):
             ),
         )
 
+    @property
+    def headers(self) -> dict[str, str]:
+        """Build headers for provider requests."""
+
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
     async def chat_completion(
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        """Send a non-streaming chat completion request."""
 
         url = f"{self.base_url}/chat/completions"
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
 
         for attempt in range(self.max_retries + 1):
             try:
                 response = await self.client.post(
                     url,
                     json=payload,
-                    headers=headers,
+                    headers=self.headers,
                 )
 
                 # Never retry client errors.
                 if 400 <= response.status_code < 500:
                     response.raise_for_status()
 
-                # Retry transient backend/server failures.
+                # Retry transient provider failures.
                 if response.status_code >= 500:
                     if attempt >= self.max_retries:
                         response.raise_for_status()
@@ -121,11 +139,60 @@ class OpenAICompatibleBackend(InferenceBackend):
 
         raise RuntimeError("Inference request failed")
 
-    async def _backoff(self, attempt: int) -> None:
+    async def chat_completion_stream(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[bytes]:
+        """
+        Stream an OpenAI-compatible chat completion response.
+
+        The provider response is forwarded without buffering the
+        complete response in memory.
+        """
+
+        url = f"{self.base_url}/chat/completions"
+
+        # Streaming requests should not be retried after the response
+        # has started. Retrying could result in duplicated tokens.
+        try:
+            async with self.client.stream(
+                "POST",
+                url,
+                json=payload,
+                headers=self.headers,
+            ) as response:
+
+                # Surface provider errors before yielding any data.
+                if response.status_code >= 400:
+                    body = await response.aread()
+
+                    error = httpx.Response(
+                        status_code=response.status_code,
+                        headers=response.headers,
+                        content=body,
+                        request=response.request,
+                    )
+
+                    error.raise_for_status()
+
+                async for chunk in response.aiter_bytes():
+                    if chunk:
+                        yield chunk
+
+        except httpx.HTTPError:
+            raise
+
+    async def _backoff(
+        self,
+        attempt: int,
+    ) -> None:
+        """Apply exponential backoff between retries."""
+
         delay = 0.5 * (2**attempt)
         await asyncio.sleep(delay)
 
     async def health(self) -> bool:
+        """Check whether the backend is reachable."""
 
         try:
             response = await self.client.get(
@@ -139,37 +206,9 @@ class OpenAICompatibleBackend(InferenceBackend):
 
         except httpx.HTTPError:
             return False
-from functools import lru_cache
-
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-class Settings(BaseSettings):
-    app_name: str = "agenyx-inference"
-    app_version: str = "0.1.0"
-
-    backend_base_url: str = "http://localhost:11434/v1"
-
-    backend_api_key: str = "ollama"
-    max_retries: int = 2
-    request_timeout_seconds: float = 120.0
-
-    max_connections: int = 100
-    max_keepalive_connections: int = 20
-
-    model: str = "qwen2.5:7b"
-
-    model_config = SettingsConfigDict(
-        env_prefix="INFERENCE_",
-        case_sensitive=False,
-    )
-
-
-@lru_cache
-def get_settings() -> Settings:
-    return Settings()
 
     async def close(self) -> None:
+        """Close the HTTP client."""
 
         if not self.client.is_closed:
             await self.client.aclose()

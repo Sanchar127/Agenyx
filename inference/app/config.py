@@ -4,12 +4,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    """Application configuration."""
+
     app_name: str = "agenyx-inference"
     app_version: str = "0.1.0"
 
-    backend_base_url: str = "http://localhost:11434/v1"
+    provider_name: str = "ollama-local"
 
+    backend_base_url: str = "http://localhost:11434/v1"
     backend_api_key: str = "ollama"
+
     max_retries: int = 2
     request_timeout_seconds: float = 120.0
 
@@ -26,4 +30,5 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return cached application settings."""
     return Settings()
