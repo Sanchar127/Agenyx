@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.agent_runtime.runtime import AgentRuntime
@@ -7,34 +9,33 @@ from app.api.errors import agenyx_error_handler
 from app.api.routes import create_router
 from app.core.config import get_settings
 from app.core.errors import AgenyxError
-from app.llm.openai_compatible import OpenAICompatibleProvider
+from app.inference.client import InferenceClient
+from app.router.client import SemanticRouterClient
 from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
 
-from contextlib import asynccontextmanager
 settings = get_settings()
 
-
-llm = OpenAICompatibleProvider(
-    base_url=settings.llm_base_url,
-    api_key=settings.llm_api_key,
-    model=settings.llm_model,
-    timeout=settings.llm_timeout_seconds,
-    max_retries=settings.llm_max_retries,
+router_client = SemanticRouterClient(
+    base_url=settings.router_base_url,
+    timeout=settings.router_timeout_seconds,
 )
 
+inference_client = InferenceClient(
+    base_url=settings.inference_base_url,
+    timeout=settings.inference_timeout_seconds,
+)
 
 tools = create_tool_registry()
-
 
 sandbox = ToolSandboxClient(
     base_url=settings.sandbox_base_url,
     timeout_seconds=settings.sandbox_timeout_seconds,
 )
 
-
 runtime = AgentRuntime(
-    llm=llm,
+    router=router_client,
+    inference=inference_client,
     tools=tools,
     max_steps=settings.agent_max_steps,
     sandbox=sandbox,
@@ -51,12 +52,15 @@ def get_runtime() -> AgentRuntime:
 async def lifespan(app: FastAPI):
     yield
 
-    await llm.close()
+    await router_client.close()
+    await inference_client.close()
     await sandbox.close()
+
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 

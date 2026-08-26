@@ -3,12 +3,22 @@ from typing import Any
 
 
 class InferenceProvider(ABC):
-    """Provider abstraction used by the inference gateway."""
+    """
+    Provider abstraction used by the inference gateway.
+
+    A provider is a backend capable of serving one or more models.
+
+    Model selection is intentionally NOT part of the provider
+    interface. Models are resolved by ModelRegistry and passed
+    through the request payload.
+    """
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Unique provider name."""
+        """
+        Return the unique provider name.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -16,15 +26,23 @@ class InferenceProvider(ABC):
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
-        """Execute a chat completion."""
+        """
+        Execute a non-streaming chat completion.
+
+        The payload contains the requested model.
+        """
         raise NotImplementedError
 
     @abstractmethod
     async def health(self) -> bool:
-        """Check provider health."""
+        """
+        Check whether the provider is healthy.
+        """
         raise NotImplementedError
 
     @abstractmethod
     async def close(self) -> None:
-        """Release provider resources."""
+        """
+        Release provider resources.
+        """
         raise NotImplementedError

@@ -8,7 +8,11 @@ repos:
       - id: check-json
       - id: check-merge-conflict
 
-  - repo: https://github.com/golangci/golangci-lint
-    rev: v2.5.0
+  - repo: local
     hooks:
-      - id: golangci-lint
+      - id: golangci-lint-router
+        name: golangci-lint (router)
+        entry: bash -c 'cd router && golangci-lint run ./...'
+        language: system
+        pass_filenames: false
+        files: ^router/.*\.go$

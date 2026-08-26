@@ -4,26 +4,30 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    app_name: str = "Agenyx Agent Runtime"
+    app_name: str = "Agenyx Agent"
     environment: str = "development"
     debug: bool = False
 
-    llm_base_url: str = "http://localhost:11434/v1"
-    llm_api_key: str = "ollama"
-    llm_model: str = "qwen2.5:7b"
+    # Semantic Router
+    router_base_url: str = "http://router:8005"
+    router_timeout_seconds: float = 10.0
 
-    llm_timeout_seconds: float = 120.0
-    llm_max_retries: int = 2
+    # Inference Service
+    inference_base_url: str = "http://inference:8004"
+    inference_timeout_seconds: float = 120.0
 
+    # Agent
     agent_max_steps: int = 8
 
-    jwt_secret: str
+    # Sandbox
+    sandbox_base_url: str = "http://sandbox:9000"
+    sandbox_timeout_seconds: float = 10.0
+
+    # Authentication
+    jwt_secret: str = "development-only-secret"
     jwt_algorithm: str = "HS256"
     jwt_issuer: str = "agenyx"
     jwt_audience: str = "agenyx-api"
-
-    sandbox_base_url: str = "http://sandbox:9000"
-    sandbox_timeout_seconds: float = 10.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

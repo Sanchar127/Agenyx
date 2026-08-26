@@ -13,8 +13,9 @@ services:
       - ./agent/.env
 
     environment:
-      AGENTYX_SANDBOX_URL: http://sandbox:9000
-      AGENTYX_INFERENCE_URL: http://inference:8004
+      AGENTYX_ROUTER_BASE_URL: http://router:8005
+      AGENTYX_INFERENCE_BASE_URL: http://inference:8004
+      AGENTYX_SANDBOX_BASE_URL: http://sandbox:9000
 
     expose:
       - "8000"
@@ -22,7 +23,27 @@ services:
     depends_on:
       - sandbox
       - inference
+      - router
 
+    restart: unless-stopped
+
+    # ─────────────────────────────────────────────
+  # Semantic Router - Go model selection service
+  # ─────────────────────────────────────────────
+  router:
+    build:
+      context: ./router
+
+    container_name: agenyx-router
+
+    environment:
+      AGENTYX_VALKEY_URL: redis://valkey:6379/0
+
+    expose:
+      - "8005"
+
+    ports:
+      - "8005:8005"
     restart: unless-stopped
 
 

@@ -5,43 +5,94 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
+from app.failover.manager import FailoverManager
+from app.models import ModelDefinition, ModelRegistry
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
 
+
 settings = get_settings()
-registry = ProviderRegistry()
+
+provider_registry = ProviderRegistry()
+
+model_registry = ModelRegistry()
 
 reliability = ReliabilityManager(
     degraded_failure_threshold=1,
     unhealthy_failure_threshold=3,
+    recovery_timeout_seconds=10.0,
 )
 
-provider = OpenAICompatibleProvider(
-    provider_name=settings.provider_name,
-    base_url=settings.backend_base_url,
-    api_key=settings.backend_api_key,
-    timeout=settings.request_timeout_seconds,
-    max_connections=settings.max_connections,
-    max_keepalive_connections=settings.max_keepalive_connections,
-    max_retries=settings.max_retries,
+
+# =========================================================
+# PROVIDERS
+# =========================================================
+
+provider_registry.register(
+    OpenAICompatibleProvider(
+        provider_name="ollama-local",
+        base_url=settings.backend_base_url,
+        api_key=settings.backend_api_key,
+        timeout=settings.request_timeout_seconds,
+        max_connections=settings.max_connections,
+        max_keepalive_connections=settings.max_keepalive_connections,
+        max_retries=settings.max_retries,
+    )
 )
 
-registry.register(provider)
-reliability.register(provider.name)
 
+# Register every provider with reliability tracking.
+for provider_name in provider_registry.list():
+    reliability.register(provider_name)
+
+
+# =========================================================
+# MODELS
+# =========================================================
+
+# One provider can expose multiple models.
+
+model_registry.register(
+    ModelDefinition(
+        model_id="qwen2.5:7b",
+        provider_name="ollama-local",
+    )
+)
+
+model_registry.register(
+    ModelDefinition(
+        model_id="llama3.2:3b",
+        provider_name="ollama-local",
+    )
+)
+
+
+# =========================================================
+# FAILOVER
+# =========================================================
+
+failover = FailoverManager(
+    registry=provider_registry,
+    reliability=reliability,
+    provider_order=settings.providers,
+    max_attempts=settings.max_failover_attempts,
+)
+
+
+# =========================================================
+# LIFECYCLE
+# =========================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     Application lifecycle.
-
-    Provider resources are released when the application shuts down.
     """
 
     yield
 
-    await registry.close()
+    await provider_registry.close()
 
 
 app = FastAPI(
@@ -51,9 +102,17 @@ app = FastAPI(
 )
 
 
+# =========================================================
+# HEALTH
+# =========================================================
+
 @app.get("/health")
 async def health() -> dict[str, str]:
-    """Liveness probe."""
+    """
+    Liveness probe.
+
+    This endpoint only confirms that the process is alive.
+    """
 
     return {
         "status": "ok",
@@ -62,52 +121,81 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready")
 async def ready() -> dict[str, Any]:
-    """Readiness probe."""
+    """
+    Readiness probe.
 
-    provider = registry.get(settings.provider_name)
+    At least one configured provider must be reachable.
+    """
 
-    if not await provider.health():
-        raise HTTPException(
-            status_code=503,
-            detail="Inference backend unavailable",
-        )
+    for provider_name in settings.providers:
+        try:
+            provider = provider_registry.get(
+                provider_name
+            )
 
-    return {
-        "status": "ready",
-        "provider": provider.name,
-    }
+        except KeyError:
+            continue
 
+        if await provider.health():
+            return {
+                "status": "ready",
+                "provider": provider.name,
+            }
+
+    raise HTTPException(
+        status_code=503,
+        detail="No inference providers available",
+    )
+
+
+# =========================================================
+# PROVIDERS
+# =========================================================
 
 @app.get("/v1/providers")
 async def providers() -> dict[str, Any]:
-    """List registered inference providers."""
+    """
+    List registered inference providers.
+    """
 
     return {
         "object": "list",
         "data": [
             {
-                "id": name,
+                "id": provider_name,
                 "object": "provider",
             }
-            for name in registry.list()
+            for provider_name in provider_registry.list()
         ],
     }
 
+
+# =========================================================
+# MODELS
+# =========================================================
 
 @app.get("/v1/models")
 async def models() -> dict[str, Any]:
-    """OpenAI-compatible model listing."""
+    """
+    List models exposed by Agenyx.
+    """
 
     return {
         "object": "list",
         "data": [
             {
-                "id": settings.model,
-                "object": "model",
-                "owned_by": "agenyx",
+                "id": model.model_id,
+                "object": model.object,
+                "owned_by": model.owned_by,
             }
+            for model in model_registry.list_models()
         ],
     }
+
+
+# =========================================================
+# CHAT COMPLETIONS
+# =========================================================
 
 @app.post(
     "/v1/chat/completions",
@@ -118,7 +206,27 @@ async def chat_completions(
 ) -> JSONResponse:
     """
     OpenAI-compatible chat completion endpoint.
+
+    Request flow:
+
+        client
+          ↓
+        validate request
+          ↓
+        resolve model
+          ↓
+        resolve provider
+          ↓
+        reliability check
+          ↓
+        provider request
+          ↓
+        response
     """
+
+    # -----------------------------------------------------
+    # Parse JSON
+    # -----------------------------------------------------
 
     try:
         payload = await request.json()
@@ -132,21 +240,59 @@ async def chat_completions(
     if not isinstance(payload, dict):
         raise HTTPException(
             status_code=400,
-            detail="Request body must be a JSON object",
+            detail=(
+                "Request body must be a JSON object"
+            ),
         )
+
+    # -----------------------------------------------------
+    # Validate messages
+    # -----------------------------------------------------
 
     messages = payload.get("messages")
 
     if not isinstance(messages, list) or not messages:
         raise HTTPException(
             status_code=400,
-            detail="Field 'messages' must be a non-empty list",
+            detail=(
+                "Field 'messages' must be a "
+                "non-empty list"
+            ),
         )
 
-    payload.setdefault(
+    # -----------------------------------------------------
+    # Resolve model
+    # -----------------------------------------------------
+
+    requested_model = payload.get(
         "model",
-        settings.model,
+        settings.default_model,
     )
+
+    if not isinstance(requested_model, str):
+        raise HTTPException(
+            status_code=400,
+            detail="Field 'model' must be a string",
+        )
+
+    try:
+        model = model_registry.get(
+            requested_model
+        )
+
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+
+    # Always send the actual registered model ID
+    # to the backend.
+    payload["model"] = model.model_id
+
+    # -----------------------------------------------------
+    # Streaming
+    # -----------------------------------------------------
 
     if payload.get("stream") is True:
         raise HTTPException(
@@ -154,31 +300,81 @@ async def chat_completions(
             detail="Streaming is not implemented yet",
         )
 
-    provider = registry.get(settings.provider_name)
-
-    # Check circuit-breaker / reliability state.
-    if not reliability.is_available(provider.name):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Provider '{provider.name}' is currently unavailable",
-        )
+    # -----------------------------------------------------
+    # Resolve provider
+    # -----------------------------------------------------
 
     try:
-        response = await provider.chat_completion(payload)
+        provider = provider_registry.get(
+            model.provider_name
+        )
 
-    except Exception as exc:
-        reliability.record_failure(provider.name)
-
+    except KeyError as exc:
         raise HTTPException(
-            status_code=502,
-            detail=f"Inference provider request failed: {exc}",
+            status_code=503,
+            detail=(
+                f"Provider '{model.provider_name}' "
+                "is not registered"
+            ),
         ) from exc
 
-    reliability.record_success(provider.name)
+    # -----------------------------------------------------
+    # Reliability
+    # -----------------------------------------------------
+
+    if not reliability.allow_request(
+        provider.name
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Provider '{provider.name}' "
+                "is currently unavailable"
+            ),
+        )
+
+    # -----------------------------------------------------
+    # Execute inference
+    # -----------------------------------------------------
+
+    try:
+        response = await provider.chat_completion(
+            payload
+        )
+
+    except Exception as exc:
+        reliability.record_failure(
+            provider.name
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Inference failed for provider "
+                f"'{provider.name}'"
+            ),
+        ) from exc
+
+    reliability.record_success(
+        provider.name
+    )
+
+    # -----------------------------------------------------
+    # Response
+    # -----------------------------------------------------
 
     return JSONResponse(
         content=response,
+        headers={
+            "X-Agenyx-Provider": provider.name,
+            "X-Agenyx-Model": model.model_id,
+        },
     )
+
+
+# =========================================================
+# RELIABILITY
+# =========================================================
 
 @app.get("/v1/reliability")
 async def reliability_status() -> dict[str, Any]:
@@ -192,9 +388,18 @@ async def reliability_status() -> dict[str, Any]:
             {
                 "provider": state.provider_name,
                 "status": state.status.value,
-                "consecutive_failures": state.consecutive_failures,
-                "total_failures": state.total_failures,
-                "total_successes": state.total_successes,
+                "circuit_state": (
+                    state.circuit_state.value
+                ),
+                "consecutive_failures": (
+                    state.consecutive_failures
+                ),
+                "total_failures": (
+                    state.total_failures
+                ),
+                "total_successes": (
+                    state.total_successes
+                ),
                 "last_failure_at": (
                     state.last_failure_at.isoformat()
                     if state.last_failure_at
@@ -203,6 +408,16 @@ async def reliability_status() -> dict[str, Any]:
                 "last_success_at": (
                     state.last_success_at.isoformat()
                     if state.last_success_at
+                    else None
+                ),
+                "circuit_opened_at": (
+                    state.circuit_opened_at.isoformat()
+                    if state.circuit_opened_at
+                    else None
+                ),
+                "circuit_half_opened_at": (
+                    state.circuit_half_opened_at.isoformat()
+                    if state.circuit_half_opened_at
                     else None
                 ),
             }
