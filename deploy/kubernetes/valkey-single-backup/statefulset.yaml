@@ -1,0 +1,108 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agenyx-valkey
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: valkey
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  serviceName: valkey
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: valkey
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey
+        app.kubernetes.io/part-of: agenyx
+
+    spec:
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: valkey
+          image: valkey/valkey:8.1-alpine
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+
+          command:
+            - valkey-server
+            - --appendonly
+            - "yes"
+            - --requirepass
+            - $(VALKEY_PASSWORD)
+
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agenyx-valkey-secret
+                  key: VALKEY_PASSWORD
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG'
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'valkey-cli -a "$VALKEY_PASSWORD" ping | grep -q PONG'
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: valkey-data
+              mountPath: /data
+
+  volumeClaimTemplates:
+    - metadata:
+        name: valkey-data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+
+        storageClassName: local-path
+
+        resources:
+          requests:
+            storage: 1Gi

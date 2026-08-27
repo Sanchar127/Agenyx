@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agenyx-router
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-router
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  replicas: 3
+
+  revisionHistoryLimit: 5
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-router
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agenyx-router
+        app.kubernetes.io/part-of: agenyx
+
+    spec:
+      serviceAccountName: agenyx-router
+      automountServiceAccountToken: false
+
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: router
+          image: agenyx-router:0.1.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8005
+              protocol: TCP
+
+          # Explicitly inject Valkey password.
+          env:
+            - name: AGENTYX_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agenyx-valkey-secret
+                  key: VALKEY_PASSWORD
+
+          envFrom:
+            - configMapRef:
+                name: agenyx-router-config
+            - secretRef:
+                name: agenyx-router-secret
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-router

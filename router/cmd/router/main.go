@@ -108,9 +108,12 @@ func newValkeyClient() (*redis.Client, error) {
 		)
 	}
 
+	if password := os.Getenv("AGENTYX_VALKEY_PASSWORD"); password != "" {
+		opt.Password = password
+	}
+
 	return redis.NewClient(opt), nil
 }
-
 func pingValkey(client *redis.Client) error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),

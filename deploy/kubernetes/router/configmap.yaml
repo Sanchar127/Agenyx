@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agenyx-router-config
+  namespace: agenyx
+data:
+  AGENTYX_ROUTER_ADDR: ":8005"
+  AGENTYX_VALKEY_URL: "redis://valkey:6379/0"
