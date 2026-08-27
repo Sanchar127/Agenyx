@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from functools import lru_cache
@@ -13,10 +12,39 @@ class Settings(BaseSettings):
     app_name: str = "Agenyx Orchestrator"
     app_version: str = "0.1.0"
 
+    # ------------------------------------------------------------------
+    # Valkey
+    # ------------------------------------------------------------------
+
+    # Kept as a fallback/direct connection URL.
     valkey_url: str = Field(
         default="redis://valkey:6379/0",
         validation_alias="AGENTYX_VALKEY_URL",
     )
+
+    valkey_password: str = Field(
+        default="",
+        validation_alias="AGENTYX_VALKEY_PASSWORD",
+    )
+
+    # Sentinel master name.
+    valkey_master_name: str = Field(
+        default="mymaster",
+        validation_alias="AGENTYX_VALKEY_MASTER_NAME",
+    )
+
+    # Comma-separated Sentinel addresses.
+    #
+    # Example:
+    # host1:26379,host2:26379,host3:26379
+    valkey_sentinel_addrs: str = Field(
+        default="",
+        validation_alias="AGENTYX_VALKEY_SENTINEL_ADDRS",
+    )
+
+    # ------------------------------------------------------------------
+    # Task queue
+    # ------------------------------------------------------------------
 
     task_stream: str = Field(
         default="agenyx:tasks",
@@ -27,6 +55,10 @@ class Settings(BaseSettings):
         default="agenyx-workers",
         validation_alias="AGENTYX_CONSUMER_GROUP",
     )
+
+    # ------------------------------------------------------------------
+    # Execution state
+    # ------------------------------------------------------------------
 
     execution_ttl_seconds: int = Field(
         default=3600,
@@ -54,4 +86,5 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return the cached application settings."""
+
     return Settings()

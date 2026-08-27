@@ -1,0 +1,90 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-orchestrator
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-orchestrator
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-orchestrator
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow traffic from the Agenyx gateway.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-gateway
+      ports:
+        - protocol: TCP
+          port: 8002
+
+    # Allow traffic from the Agent.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-agent
+      ports:
+        - protocol: TCP
+          port: 8002
+
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Agent.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-agent
+      ports:
+        - protocol: TCP
+          port: 8000
+
+    # Semantic router.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-router
+      ports:
+        - protocol: TCP
+          port: 8005
+
+    # Worker.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-worker
+      ports:
+        - protocol: TCP
+          port: 8003
+
+    # Valkey + Sentinel.
+    #
+    # Orchestrator uses Sentinel to discover the
+    # current writable Valkey primary.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agenyx
+      ports:
+        # Valkey.
+        - protocol: TCP
+          port: 6379
+
+        # Valkey Sentinel.
+        - protocol: TCP
+          port: 26379

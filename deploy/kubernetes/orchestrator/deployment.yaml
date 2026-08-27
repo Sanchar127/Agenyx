@@ -1,0 +1,148 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agenyx-orchestrator
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-orchestrator
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  replicas: 3
+
+  revisionHistoryLimit: 5
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-orchestrator
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agenyx-orchestrator
+        app.kubernetes.io/part-of: agenyx
+
+    spec:
+      serviceAccountName: agenyx-orchestrator
+      automountServiceAccountToken: false
+
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: orchestrator
+          image: agenyx-orchestrator:0.1.0
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8002
+              protocol: TCP
+
+          # Load all non-secret configuration.
+          envFrom:
+            - configMapRef:
+                name: agenyx-orchestrator-config
+
+          # Load sensitive configuration, including:
+          # AGENTYX_VALKEY_PASSWORD
+          env:
+            - name: AGENTYX_VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agenyx-orchestrator-secret
+                  key: AGENTYX_VALKEY_PASSWORD
+
+            - name: AGENTYX_INTERNAL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agenyx-orchestrator-secret
+                  key: AGENTYX_INTERNAL_API_KEY
+
+            - name: AGENTYX_ORCHESTRATOR_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: agenyx-orchestrator-secret
+                  key: AGENTYX_ORCHESTRATOR_SECRET
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15
+            successThreshold: 1
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-orchestrator

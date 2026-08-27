@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import valkey
+from valkey.sentinel import Sentinel
 
 from app.core.config import Settings
 
@@ -18,18 +19,75 @@ def utc_now() -> str:
 
 
 class TaskQueue:
-    """Valkey Streams client used by the orchestrator."""
+    """Valkey Streams client connected through Valkey Sentinel."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.client = self._create_client()
 
-        self.client = valkey.from_url(
-            settings.valkey_url,
-            decode_responses=True,
-        )
+    def _create_client(self) -> valkey.Redis:
+        """Create a Valkey client connected to the Sentinel primary."""
+
+        addresses = self.settings.valkey_sentinel_addrs.strip()
+
+        if not addresses:
+            raise QueueError(
+                "Valkey Sentinel addresses are not configured",
+            )
+
+        sentinel_addresses: list[tuple[str, int]] = []
+
+        for address in addresses.split(","):
+            address = address.strip()
+
+            if not address:
+                continue
+
+            try:
+                host, port_string = address.rsplit(":", 1)
+                port = int(port_string)
+
+                if not host:
+                    raise ValueError("empty host")
+
+                if not 1 <= port <= 65535:
+                    raise ValueError("invalid port")
+
+            except ValueError as exc:
+                raise QueueError(
+                    f"Invalid Valkey Sentinel address: {address!r}",
+                ) from exc
+
+            sentinel_addresses.append((host, port))
+
+        if not sentinel_addresses:
+            raise QueueError(
+                "No valid Valkey Sentinel addresses configured",
+            )
+
+        try:
+            sentinel = Sentinel(
+                sentinel_addresses,
+                password=self.settings.valkey_password or None,
+                decode_responses=True,
+            )
+
+            client = sentinel.master_for(
+                self.settings.valkey_master_name,
+                password=self.settings.valkey_password or None,
+                db=0,
+                decode_responses=True,
+            )
+
+            return client
+
+        except Exception as exc:
+            raise QueueError(
+                "Unable to initialize Valkey Sentinel client",
+            ) from exc
 
     def ping(self) -> bool:
-        """Check whether Valkey is reachable."""
+        """Check whether the Valkey primary is reachable."""
 
         try:
             return bool(self.client.ping())
@@ -48,11 +106,19 @@ class TaskQueue:
                 id="0",
                 mkstream=True,
             )
+
         except valkey.ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise QueueError(
-                    "Unable to create Valkey consumer group",
-                ) from exc
+            if "BUSYGROUP" in str(exc):
+                return
+
+            raise QueueError(
+                "Unable to create Valkey consumer group",
+            ) from exc
+
+        except Exception as exc:
+            raise QueueError(
+                "Unable to create Valkey consumer group",
+            ) from exc
 
     def create_execution(
         self,
@@ -100,15 +166,16 @@ class TaskQueue:
         """Publish an execution to the task stream."""
 
         try:
-            return str(
-                self.client.xadd(
-                    self.settings.task_stream,
-                    {
-                        "execution_id": execution_id,
-                        "intent": intent,
-                    },
-                ),
+            message_id = self.client.xadd(
+                self.settings.task_stream,
+                {
+                    "execution_id": execution_id,
+                    "intent": intent,
+                },
             )
+
+            return str(message_id)
+
         except Exception as exc:
             raise QueueError(
                 "Unable to enqueue agent execution",
@@ -123,7 +190,10 @@ class TaskQueue:
         key = f"agenyx:execution:{execution_id}"
 
         try:
-            return dict(self.client.hgetall(key))
+            return dict(
+                self.client.hgetall(key),
+            )
+
         except Exception as exc:
             raise QueueError(
                 "Unable to retrieve execution state",
@@ -214,4 +284,7 @@ class TaskQueue:
     def close(self) -> None:
         """Close the Valkey connection."""
 
-        self.client.close()
+        try:
+            self.client.close()
+        except Exception:
+            pass

@@ -13,29 +13,29 @@ spec:
     - Ingress
 
   ingress:
-    # Router → Valkey
+    # Orchestrator
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-orchestrator
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Worker
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agenyx-worker
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Router
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agenyx-router
-      ports:
-        - protocol: TCP
-          port: 6379
-
-    # Valkey replicas → Valkey primary/replicas
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: valkey
-      ports:
-        - protocol: TCP
-          port: 6379
-
-    # Sentinel → Valkey
-    - from:
-        - podSelector:
-            matchLabels:
-              app.kubernetes.io/name: valkey-sentinel
       ports:
         - protocol: TCP
           port: 6379
