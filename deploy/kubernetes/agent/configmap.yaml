@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agenyx-agent-config
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-agent
+    app.kubernetes.io/part-of: agenyx
+
+data:
+  AGENTYX_AGENT_HOST: "0.0.0.0"
+  AGENTYX_AGENT_PORT: "8000"
+
+  # Kubernetes Service for the semantic router.
+  AGENTYX_ROUTER_BASE_URL: "http://agenyx-router:8005"

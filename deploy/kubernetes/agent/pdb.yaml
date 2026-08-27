@@ -1,0 +1,15 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: agenyx-agent
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-agent
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  minAvailable: 2
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-agent
