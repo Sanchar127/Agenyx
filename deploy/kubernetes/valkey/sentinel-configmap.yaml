@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agenyx-valkey-sentinel-config
+  namespace: agenyx
+data:
+  sentinel.conf: |
+    port 26379
+
+    sentinel monitor mymaster agenyx-valkey-0.valkey.agenyx.svc.cluster.local 6379 2
+
+    sentinel auth-pass mymaster agenyx-valkey-dev-password
+
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 10000
+    sentinel parallel-syncs mymaster 1
+
+    protected-mode no

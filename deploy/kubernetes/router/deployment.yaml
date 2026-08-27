@@ -49,8 +49,8 @@ spec:
               containerPort: 8005
               protocol: TCP
 
-          # Explicitly inject Valkey password.
           env:
+            # Valkey authentication.
             - name: AGENTYX_VALKEY_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -60,6 +60,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: agenyx-router-config
+
             - secretRef:
                 name: agenyx-router-secret
 
@@ -67,6 +68,7 @@ spec:
             requests:
               cpu: 100m
               memory: 128Mi
+
             limits:
               cpu: 500m
               memory: 512Mi
@@ -74,6 +76,7 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+
             capabilities:
               drop:
                 - ALL
@@ -82,6 +85,7 @@ spec:
             httpGet:
               path: /ready
               port: http
+
             initialDelaySeconds: 2
             periodSeconds: 5
             timeoutSeconds: 2
@@ -92,6 +96,7 @@ spec:
             httpGet:
               path: /health
               port: http
+
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 2
@@ -101,6 +106,7 @@ spec:
             httpGet:
               path: /health
               port: http
+
             periodSeconds: 2
             timeoutSeconds: 2
             failureThreshold: 15
@@ -109,6 +115,7 @@ spec:
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
           whenUnsatisfiable: ScheduleAnyway
+
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: agenyx-router

@@ -1,0 +1,187 @@
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agenyx-valkey-sentinel
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: valkey-sentinel
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  serviceName: valkey-sentinel
+  replicas: 3
+  podManagementPolicy: Parallel
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: valkey-sentinel
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: valkey-sentinel
+        app.kubernetes.io/part-of: agenyx
+
+    spec:
+      dnsPolicy: ClusterFirst
+
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: sentinel
+          image: valkey/valkey:8.1-alpine
+          imagePullPolicy: IfNotPresent
+
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agenyx-valkey-secret
+                  key: VALKEY_PASSWORD
+
+            - name: VALKEY_PRIMARY_HOST
+              value: agenyx-valkey-0.valkey.agenyx.svc.cluster.local
+
+            - name: VALKEY_PRIMARY_PORT
+              value: "6379"
+
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+
+              echo "======================================"
+              echo "Starting Agenyx Valkey Sentinel"
+              echo "======================================"
+
+              echo "Primary hostname:"
+              echo "${VALKEY_PRIMARY_HOST}"
+
+              echo "DNS configuration:"
+              cat /etc/resolv.conf
+
+              echo "Waiting for primary DNS..."
+
+              PRIMARY_IP=""
+
+              while [ -z "${PRIMARY_IP}" ]; do
+                PRIMARY_IP="$(
+                  getent hosts "${VALKEY_PRIMARY_HOST}" 2>/dev/null \
+                    | awk 'NR==1 {print $1}'
+                )" || true
+
+                if [ -z "${PRIMARY_IP}" ]; then
+                  echo "Primary DNS not available yet..."
+                  sleep 2
+                fi
+              done
+
+              echo "Primary resolved:"
+              echo "${VALKEY_PRIMARY_HOST} -> ${PRIMARY_IP}"
+
+              echo "Waiting for primary Valkey..."
+
+              until valkey-cli \
+                -h "${PRIMARY_IP}" \
+                -p "${VALKEY_PRIMARY_PORT}" \
+                -a "${VALKEY_PASSWORD}" \
+                ping 2>/dev/null | grep -q PONG
+              do
+                echo "Primary not reachable yet..."
+                sleep 2
+
+                PRIMARY_IP="$(
+                  getent hosts "${VALKEY_PRIMARY_HOST}" 2>/dev/null \
+                    | awk 'NR==1 {print $1}'
+                )" || true
+              done
+
+              echo "Primary Valkey is reachable."
+
+              cat > /tmp/sentinel.conf <<EOF
+              port 26379
+              bind 0.0.0.0
+              protected-mode no
+
+              sentinel monitor mymaster ${PRIMARY_IP} ${VALKEY_PRIMARY_PORT} 2
+              sentinel auth-pass mymaster ${VALKEY_PASSWORD}
+
+              sentinel down-after-milliseconds mymaster 5000
+              sentinel failover-timeout mymaster 10000
+              sentinel parallel-syncs mymaster 1
+              EOF
+
+              echo "Sentinel configuration generated."
+
+              echo "--------------------------------------"
+              echo "Sentinel configuration:"
+              echo "--------------------------------------"
+
+              sed \
+                's/^sentinel auth-pass mymaster .*/sentinel auth-pass mymaster ******/' \
+                /tmp/sentinel.conf
+
+              echo "--------------------------------------"
+
+              exec valkey-sentinel /tmp/sentinel.conf
+
+          ports:
+            - name: sentinel
+              containerPort: 26379
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  valkey-cli \
+                    -h 127.0.0.1 \
+                    -p 26379 \
+                    ping 2>/dev/null | grep -q PONG
+
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  valkey-cli \
+                    -h 127.0.0.1 \
+                    -p 26379 \
+                    ping 2>/dev/null | grep -q PONG
+
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+      terminationGracePeriodSeconds: 30

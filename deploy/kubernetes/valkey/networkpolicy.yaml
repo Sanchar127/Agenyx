@@ -3,6 +3,7 @@ kind: NetworkPolicy
 metadata:
   name: agenyx-valkey
   namespace: agenyx
+
 spec:
   podSelector:
     matchLabels:
@@ -12,10 +13,29 @@ spec:
     - Ingress
 
   ingress:
+    # Router → Valkey
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agenyx-router
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Valkey replicas → Valkey primary/replicas
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Sentinel → Valkey
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey-sentinel
       ports:
         - protocol: TCP
           port: 6379

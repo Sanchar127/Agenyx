@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -24,8 +25,13 @@ import (
 )
 
 const (
-	defaultAddr      = ":8005"
-	defaultValkeyURL = "redis://valkey:6379/0"
+	defaultAddr = ":8005"
+
+	defaultValkeyMasterName = "mymaster"
+
+	defaultValkeySentinelAddrs = "agenyx-valkey-sentinel-0.valkey-sentinel.agenyx.svc.cluster.local:26379," +
+		"agenyx-valkey-sentinel-1.valkey-sentinel.agenyx.svc.cluster.local:26379," +
+		"agenyx-valkey-sentinel-2.valkey-sentinel.agenyx.svc.cluster.local:26379"
 
 	valkeyPingTimeout = 3 * time.Second
 	shutdownTimeout   = 5 * time.Second
@@ -94,26 +100,53 @@ func run() error {
 	return serve(httpServer)
 }
 
+// newValkeyClient creates a Valkey client using Sentinel failover.
+//
+// The router connects to the Valkey primary discovered by Sentinel.
+// The Valkey server password is supplied through AGENTYX_VALKEY_PASSWORD.
+//
+// Sentinel authentication is intentionally not configured because the
+// current Sentinel deployment does not require authentication.
 func newValkeyClient() (*redis.Client, error) {
-	valkeyURL := getEnv(
-		"AGENTYX_VALKEY_URL",
-		defaultValkeyURL,
+	masterName := getEnv(
+		"AGENTYX_VALKEY_MASTER_NAME",
+		defaultValkeyMasterName,
 	)
 
-	opt, err := redis.ParseURL(valkeyURL)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"invalid AGENTYX_VALKEY_URL: %w",
-			err,
-		)
+	sentinelAddrsValue := getEnv(
+		"AGENTYX_VALKEY_SENTINEL_ADDRS",
+		defaultValkeySentinelAddrs,
+	)
+
+	sentinelAddrs := splitCSV(sentinelAddrsValue)
+
+	if len(sentinelAddrs) == 0 {
+		return nil, errors.New("no Valkey Sentinel addresses configured")
 	}
 
-	if password := os.Getenv("AGENTYX_VALKEY_PASSWORD"); password != "" {
-		opt.Password = password
+	valkeyPassword := os.Getenv("AGENTYX_VALKEY_PASSWORD")
+
+	options := &redis.FailoverOptions{
+		MasterName:    masterName,
+		SentinelAddrs: sentinelAddrs,
+
+		// Password used when connecting to the Valkey primary/replicas.
+		Password: valkeyPassword,
+
+		// Sentinel itself currently does not require authentication.
+		//
+		// If Sentinel authentication is enabled later, configure:
+		//
+		// SentinelPassword: os.Getenv("AGENTYX_VALKEY_SENTINEL_PASSWORD"),
+
+		DB: 0,
 	}
 
-	return redis.NewClient(opt), nil
+	client := redis.NewFailoverClient(options)
+
+	return client, nil
 }
+
 func pingValkey(client *redis.Client) error {
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
@@ -474,4 +507,22 @@ func getEnv(
 	}
 
 	return value
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+
+	result := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+
+		if part == "" {
+			continue
+		}
+
+		result = append(result, part)
+	}
+
+	return result
 }

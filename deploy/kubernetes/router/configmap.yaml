@@ -3,6 +3,8 @@ kind: ConfigMap
 metadata:
   name: agenyx-router-config
   namespace: agenyx
+
 data:
-  AGENTYX_ROUTER_ADDR: ":8005"
-  AGENTYX_VALKEY_URL: "redis://valkey:6379/0"
+  AGENTYX_VALKEY_MASTER_NAME: "mymaster"
+
+  AGENTYX_VALKEY_SENTINEL_ADDRS: "agenyx-valkey-sentinel-0.valkey-sentinel.agenyx.svc.cluster.local:26379,agenyx-valkey-sentinel-1.valkey-sentinel.agenyx.svc.cluster.local:26379,agenyx-valkey-sentinel-2.valkey-sentinel.agenyx.svc.cluster.local:26379"
