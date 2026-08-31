@@ -5,8 +5,9 @@ metadata:
   namespace: agenyx
 
 data:
-  VALKEY_SENTINEL_HOSTS: "agenyx-valkey-sentinel:26379"
-  VALKEY_MASTER_NAME: "mymaster"
+  AGENTYX_VALKEY_MASTER_NAME: "mymaster"
+
+  AGENTYX_VALKEY_SENTINEL_ADDRS: "agenyx-valkey-sentinel-0.valkey-sentinel.agenyx.svc.cluster.local:26379,agenyx-valkey-sentinel-1.valkey-sentinel.agenyx.svc.cluster.local:26379,agenyx-valkey-sentinel-2.valkey-sentinel.agenyx.svc.cluster.local:26379"
 
   TASK_STREAM: "agenyx:tasks"
   CONSUMER_GROUP: "agenyx-workers"
@@ -14,7 +15,9 @@ data:
   AGENT_URL: "http://agenyx-agent:8000"
 
   AGENT_TIMEOUT_SECONDS: "120"
+
   MAX_ATTEMPTS: "4"
+
   RETRY_BASE_DELAY_SECONDS: "5"
   RETRY_MAX_DELAY_SECONDS: "60"
 

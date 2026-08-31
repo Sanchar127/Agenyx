@@ -1,9 +1,9 @@
-
 from __future__ import annotations
 
 from typing import Any
 
 import valkey
+from valkey.sentinel import Sentinel
 
 
 class WorkerQueue:
@@ -19,6 +19,9 @@ class WorkerQueue:
         dead_letter_stream: str = "agenyx:tasks:dead-letter",
         pending_idle_ms: int = 10_000,
         pending_batch_size: int = 10,
+        sentinel_hosts: list[tuple[str, int]] | None = None,
+        master_name: str | None = None,
+        password: str | None = None,
     ) -> None:
         if pending_idle_ms < 1:
             raise ValueError(
@@ -38,10 +41,24 @@ class WorkerQueue:
         self.pending_idle_ms = pending_idle_ms
         self.pending_batch_size = pending_batch_size
 
-        self.client = valkey.from_url(
-            url,
-            decode_responses=True,
-        )
+        if sentinel_hosts and master_name:
+            sentinel = Sentinel(
+                sentinel_hosts,
+                password=password,
+                decode_responses=True,
+            )
+
+            self.client = sentinel.master_for(
+                master_name,
+                password=password,
+                decode_responses=True,
+            )
+
+        else:
+            self.client = valkey.from_url(
+                url,
+                decode_responses=True,
+            )
 
     def ensure_group(self) -> None:
         """Create the consumer group if necessary."""

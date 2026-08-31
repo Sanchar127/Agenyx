@@ -29,6 +29,21 @@ class Settings:
             socket.gethostname(),
         )
 
+        self.valkey_sentinel_hosts = os.getenv(
+            "VALKEY_SENTINEL_HOSTS",
+            "valkey-sentinel:26379",
+        )
+
+        self.valkey_master_name = os.getenv(
+            "VALKEY_MASTER_NAME",
+            "mymaster",
+        )
+
+        self.valkey_password = os.getenv(
+            "VALKEY_PASSWORD",
+            "",
+        )
+
         self.agent_url = os.getenv(
             "AGENT_URL",
             "http://agent:8000",

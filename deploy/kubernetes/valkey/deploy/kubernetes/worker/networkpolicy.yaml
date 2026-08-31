@@ -1,0 +1,65 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-worker
+  namespace: agenyx
+
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-worker
+
+  policyTypes:
+    - Egress
+
+  egress:
+
+    # Valkey
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agenyx
+
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Valkey Sentinel
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agenyx
+
+      ports:
+        - protocol: TCP
+          port: 26379
+
+    # Agent
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agenyx
+
+      ports:
+        - protocol: TCP
+          port: 8000
+
+    # Kubernetes DNS - UDP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+
+      ports:
+        - protocol: UDP
+          port: 53
+
+    # Kubernetes DNS - TCP
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+
+      ports:
+        - protocol: TCP
+          port: 53

@@ -5,9 +5,7 @@ metadata:
   namespace: agenyx
 
 data:
-  VALKEY_SENTINEL_HOSTS: "agenyx-valkey-sentinel:26379"
-  VALKEY_MASTER_NAME: "mymaster"
-
+  VALKEY_URL: "redis://agenyx-valkey:6379/0"
   TASK_STREAM: "agenyx:tasks"
   CONSUMER_GROUP: "agenyx-workers"
 
