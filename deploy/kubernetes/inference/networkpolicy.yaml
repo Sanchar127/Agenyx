@@ -3,7 +3,9 @@ kind: NetworkPolicy
 metadata:
   name: agenyx-inference
   namespace: agenyx
-
+  labels:
+    app.kubernetes.io/name: agenyx-inference
+    app.kubernetes.io/part-of: agenyx
 spec:
   podSelector:
     matchLabels:
@@ -14,11 +16,23 @@ spec:
     - Egress
 
   ingress:
+    # Agenyx services
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8004
 
+    # Prometheus monitoring
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
       ports:
         - protocol: TCP
           port: 8004

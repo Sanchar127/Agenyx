@@ -6,6 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: agenyx-inference
     app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
 spec:
   selector:
     matchLabels:
