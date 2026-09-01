@@ -148,3 +148,12 @@ def get_logger(
     """Return a configured application logger."""
 
     return logging.getLogger(name)
+
+
+# =========================================================
+# APPLICATION LOGGER
+# =========================================================
+
+configure_logging()
+
+logger = get_logger("agenyx.inference")

@@ -1,16 +1,17 @@
+import time
 from contextlib import asynccontextmanager
 from typing import Any
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-import time
 from app.config import get_settings
 from app.failover.manager import FailoverManager
+from app.logger import logger
 from app.models import ModelDefinition, ModelRegistry
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
-from app.logger import logger
+
+
 settings = get_settings()
 
 provider_registry = ProviderRegistry()
@@ -49,8 +50,6 @@ for provider_name in provider_registry.list():
 # =========================================================
 # MODELS
 # =========================================================
-
-# One provider can expose multiple models.
 
 model_registry.register(
     ModelDefinition(
@@ -100,9 +99,17 @@ async def lifespan(app: FastAPI):
     )
 
     yield
-    logger.info("Inference service shutting down")
+
+    logger.info(
+        "Inference service shutting down"
+    )
+
     await provider_registry.close()
-    logger.info("Inference providers closed")
+
+    logger.info(
+        "Inference providers closed"
+    )
+
 
 app = FastAPI(
     title=settings.app_name,
@@ -122,6 +129,10 @@ async def health() -> dict[str, str]:
 
     This endpoint only confirms that the process is alive.
     """
+
+    logger.debug(
+        "Health check requested"
+    )
 
     return {
         "status": "ok",
@@ -143,19 +154,34 @@ async def ready() -> dict[str, Any]:
             )
 
         except KeyError:
+            logger.warning(
+                "Configured provider is not registered",
+                extra={
+                    "provider": provider_name,
+                },
+            )
             continue
 
         if await provider.health():
+            logger.debug(
+                "Inference service ready",
+                extra={
+                    "provider": provider.name,
+                },
+            )
+
             return {
                 "status": "ready",
                 "provider": provider.name,
             }
+
     logger.warning(
         "Inference service not ready: no providers available",
         extra={
             "providers": settings.providers,
         },
     )
+
     raise HTTPException(
         status_code=503,
         detail="No inference providers available",
@@ -172,6 +198,15 @@ async def providers() -> dict[str, Any]:
     List registered inference providers.
     """
 
+    provider_list = provider_registry.list()
+
+    logger.info(
+        "Inference providers listed",
+        extra={
+            "providers": provider_list,
+        },
+    )
+
     return {
         "object": "list",
         "data": [
@@ -179,16 +214,9 @@ async def providers() -> dict[str, Any]:
                 "id": provider_name,
                 "object": "provider",
             }
-            for provider_name in provider_registry.list()
+            for provider_name in provider_list
         ],
     }
-
-    logger.info(
-    "Inference providers registered",
-    extra={
-        "providers": provider_registry.list(),
-    },
-    )
 
 
 # =========================================================
@@ -201,6 +229,18 @@ async def models() -> dict[str, Any]:
     List models exposed by Agenyx.
     """
 
+    model_list = model_registry.list_models()
+
+    logger.info(
+        "Inference models listed",
+        extra={
+            "models": [
+                model.model_id
+                for model in model_list
+            ],
+        },
+    )
+
     return {
         "object": "list",
         "data": [
@@ -209,19 +249,10 @@ async def models() -> dict[str, Any]:
                 "object": model.object,
                 "owned_by": model.owned_by,
             }
-            for model in model_registry.list_models()
+            for model in model_list
         ],
     }
 
-    logger.info(
-    "Inference models registered",
-    extra={
-        "models": [
-            model.model_id
-            for model in model_registry.list_models()
-            ],
-        },
-    )
 
 # =========================================================
 # CHAT COMPLETIONS
@@ -241,7 +272,9 @@ async def chat_completions(
 
         client
           ↓
-        validate request
+        parse request
+          ↓
+        validate messages
           ↓
         resolve model
           ↓
@@ -253,32 +286,37 @@ async def chat_completions(
           ↓
         response
     """
-    start_time = time.perf_counter()
+
+    request_start = time.perf_counter()
+
     # -----------------------------------------------------
     # Parse JSON
     # -----------------------------------------------------
-    logger.info(
-        "Inference request received",
-        extra={
-            "model": model.model_id,
-            "provider": model.provider_name,
-        },
-    )
-        try:
+
+    try:
         payload = await request.json()
 
     except Exception as exc:
+        logger.warning(
+            "Inference request contained invalid JSON",
+            extra={
+                "error_type": type(exc).__name__,
+            },
+        )
+
         raise HTTPException(
             status_code=400,
             detail="Invalid JSON request",
         ) from exc
 
     if not isinstance(payload, dict):
+        logger.warning(
+            "Inference request body is not a JSON object"
+        )
+
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Request body must be a JSON object"
-            ),
+            detail="Request body must be a JSON object",
         )
 
     # -----------------------------------------------------
@@ -288,6 +326,10 @@ async def chat_completions(
     messages = payload.get("messages")
 
     if not isinstance(messages, list) or not messages:
+        logger.warning(
+            "Inference request contains invalid messages",
+        )
+
         raise HTTPException(
             status_code=400,
             detail=(
@@ -306,6 +348,13 @@ async def chat_completions(
     )
 
     if not isinstance(requested_model, str):
+        logger.warning(
+            "Inference request contains invalid model field",
+            extra={
+                "model": requested_model,
+            },
+        )
+
         raise HTTPException(
             status_code=400,
             detail="Field 'model' must be a string",
@@ -317,20 +366,41 @@ async def chat_completions(
         )
 
     except KeyError as exc:
+        logger.warning(
+            "Requested inference model not found",
+            extra={
+                "model": requested_model,
+            },
+        )
+
         raise HTTPException(
             status_code=404,
             detail=str(exc),
         ) from exc
 
-    # Always send the actual registered model ID
-    # to the backend.
     payload["model"] = model.model_id
+
+    logger.info(
+        "Inference request received",
+        extra={
+            "model": model.model_id,
+            "provider": model.provider_name,
+        },
+    )
 
     # -----------------------------------------------------
     # Streaming
     # -----------------------------------------------------
 
     if payload.get("stream") is True:
+        logger.warning(
+            "Streaming inference request rejected",
+            extra={
+                "model": model.model_id,
+                "provider": model.provider_name,
+            },
+        )
+
         raise HTTPException(
             status_code=501,
             detail="Streaming is not implemented yet",
@@ -346,6 +416,14 @@ async def chat_completions(
         )
 
     except KeyError as exc:
+        logger.error(
+            "Inference provider is not registered",
+            extra={
+                "model": model.model_id,
+                "provider": model.provider_name,
+            },
+        )
+
         raise HTTPException(
             status_code=503,
             detail=(
@@ -361,6 +439,14 @@ async def chat_completions(
     if not reliability.allow_request(
         provider.name
     ):
+        logger.warning(
+            "Inference request rejected by reliability manager",
+            extra={
+                "model": model.model_id,
+                "provider": provider.name,
+            },
+        )
+
         raise HTTPException(
             status_code=503,
             detail=(
@@ -383,6 +469,24 @@ async def chat_completions(
             provider.name
         )
 
+        logger.error(
+            "Inference request failed",
+            extra={
+                "model": model.model_id,
+                "provider": provider.name,
+                "error_type": type(exc).__name__,
+                "latency_ms": round(
+                    (
+                        time.perf_counter()
+                        - request_start
+                    )
+                    * 1000,
+                    2,
+                ),
+            },
+            exc_info=True,
+        )
+
         raise HTTPException(
             status_code=503,
             detail=(
@@ -398,6 +502,24 @@ async def chat_completions(
     # -----------------------------------------------------
     # Response
     # -----------------------------------------------------
+
+    latency_ms = round(
+        (
+            time.perf_counter()
+            - request_start
+        )
+        * 1000,
+        2,
+    )
+
+    logger.info(
+        "Inference request completed",
+        extra={
+            "model": model.model_id,
+            "provider": provider.name,
+            "latency_ms": latency_ms,
+        },
+    )
 
     return JSONResponse(
         content=response,
@@ -417,6 +539,15 @@ async def reliability_status() -> dict[str, Any]:
     """
     Return provider reliability state.
     """
+
+    states = reliability.list_states()
+
+    logger.debug(
+        "Reliability status requested",
+        extra={
+            "provider_count": len(states),
+        },
+    )
 
     return {
         "object": "reliability",
@@ -457,6 +588,6 @@ async def reliability_status() -> dict[str, Any]:
                     else None
                 ),
             }
-            for state in reliability.list_states()
+            for state in states
         ],
     }
