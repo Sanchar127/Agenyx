@@ -143,7 +143,7 @@ spec:
               memory: 64Mi
             limits:
               cpu: 100m
-              memory: 128Mi
+              memory: 256Mi
 
           securityContext:
             allowPrivilegeEscalation: false
@@ -151,6 +151,25 @@ spec:
             capabilities:
               drop:
                 - ALL
+
+          # IMPORTANT:
+          # Sentinel intentionally spends time waiting for the primary
+          # before starting. A startupProbe prevents liveness/readiness
+          # from killing the container during that initialization period.
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  valkey-cli \
+                    -h 127.0.0.1 \
+                    -p 26379 \
+                    ping 2>/dev/null | grep -q PONG
+
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
 
           readinessProbe:
             exec:
@@ -163,7 +182,6 @@ spec:
                     -p 26379 \
                     ping 2>/dev/null | grep -q PONG
 
-            initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
@@ -179,7 +197,6 @@ spec:
                     -p 26379 \
                     ping 2>/dev/null | grep -q PONG
 
-            initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 3
             failureThreshold: 3

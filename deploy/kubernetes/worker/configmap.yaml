@@ -5,16 +5,27 @@ metadata:
   namespace: agenyx
 
 data:
+  # Fallback/direct Valkey URL.
+  # Sentinel is preferred when VALKEY_SENTINEL_HOSTS is configured.
   VALKEY_URL: "redis://agenyx-valkey:6379/0"
+
   TASK_STREAM: "agenyx:tasks"
   CONSUMER_GROUP: "agenyx-workers"
+
+  VALKEY_SENTINEL_HOSTS: "agenyx-valkey-sentinel-0.valkey-sentinel.agenyx.svc.cluster.local:26379,agenyx-valkey-sentinel-1.valkey-sentinel.agenyx.svc.cluster.local:26379,agenyx-valkey-sentinel-2.valkey-sentinel.agenyx.svc.cluster.local:26379"
+
+  VALKEY_MASTER_NAME: "mymaster"
 
   AGENT_URL: "http://agenyx-agent:8000"
 
   AGENT_TIMEOUT_SECONDS: "120"
+
   MAX_ATTEMPTS: "4"
+
   RETRY_BASE_DELAY_SECONDS: "5"
+
   RETRY_MAX_DELAY_SECONDS: "60"
 
   PENDING_IDLE_MS: "10000"
+
   PENDING_BATCH_SIZE: "10"

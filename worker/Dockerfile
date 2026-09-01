@@ -1,22 +1,25 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: agenyx-worker-config
-  namespace: agenyx
 
-data:
-  VALKEY_SENTINEL_HOSTS: "agenyx-valkey-sentinel:26379"
-  VALKEY_MASTER_NAME: "mymaster"
+FROM python:3.14-slim
 
-  TASK_STREAM: "agenyx:tasks"
-  CONSUMER_GROUP: "agenyx-workers"
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-  AGENT_URL: "http://agenyx-agent:8000"
+WORKDIR /app
 
-  AGENT_TIMEOUT_SECONDS: "120"
-  MAX_ATTEMPTS: "4"
-  RETRY_BASE_DELAY_SECONDS: "5"
-  RETRY_MAX_DELAY_SECONDS: "60"
+# Install Python dependencies first for better Docker layer caching.
+COPY requirements.txt .
 
-  PENDING_IDLE_MS: "10000"
-  PENDING_BATCH_SIZE: "10"
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Create a non-root user with a numeric UID/GID.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home app
+
+# Copy application source.
+COPY app ./app
+
+# Kubernetes runAsNonRoot can reliably verify this numeric UID.
+USER 10001:10001
+
+CMD ["python", "-m", "app.main"]

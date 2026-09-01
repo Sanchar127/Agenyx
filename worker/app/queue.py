@@ -41,24 +41,36 @@ class WorkerQueue:
         self.pending_idle_ms = pending_idle_ms
         self.pending_batch_size = pending_batch_size
 
+        self._sentinel: Sentinel | None = None
+
+        # ------------------------------------------------------------------
+        # Sentinel mode
+        # ------------------------------------------------------------------
+
         if sentinel_hosts and master_name:
-            sentinel = Sentinel(
+            self._sentinel = Sentinel(
                 sentinel_hosts,
-                password=password,
+                password=password or None,
                 decode_responses=True,
             )
 
-            self.client = sentinel.master_for(
+            self.client = self._sentinel.master_for(
                 master_name,
-                password=password,
+                password=password or None,
                 decode_responses=True,
             )
 
-        else:
-            self.client = valkey.from_url(
-                url,
-                decode_responses=True,
-            )
+            return
+
+        # ------------------------------------------------------------------
+        # Direct Valkey mode
+        # ------------------------------------------------------------------
+
+        self.client = valkey.from_url(
+            url,
+            password=password or None,
+            decode_responses=True,
+        )
 
     def ensure_group(self) -> None:
         """Create the consumer group if necessary."""
@@ -70,6 +82,7 @@ class WorkerQueue:
                 id="0",
                 mkstream=True,
             )
+
         except valkey.ResponseError as exc:
             if "BUSYGROUP" not in str(exc):
                 raise
@@ -163,3 +176,6 @@ class WorkerQueue:
         """Close the Valkey client."""
 
         self.client.close()
+
+        if self._sentinel is not None:
+            self._sentinel.close()

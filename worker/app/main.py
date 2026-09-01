@@ -34,6 +34,13 @@ def create_worker() -> Worker:
         dead_letter_stream="agenyx:tasks:dead-letter",
         pending_idle_ms=settings.pending_idle_ms,
         pending_batch_size=settings.pending_batch_size,
+        sentinel_hosts=settings.valkey_sentinel_hosts or None,
+        master_name=(
+            settings.valkey_master_name
+            if settings.valkey_sentinel_hosts
+            else None
+        ),
+        password=settings.valkey_password or None,
     )
 
     agent_client = AgentClient(
@@ -41,12 +48,8 @@ def create_worker() -> Worker:
         timeout=settings.agent_timeout_seconds,
     )
 
-    # Create the Worker first so it owns the single shutdown event.
-    #
-    # We temporarily create the executor with the worker's event
-    # after the Worker exists.
-    #
-    # The Worker and Executor share exactly one shutdown signal.
+    # Create the Worker first so it owns the single
+    # shutdown event shared with the executor.
     worker = Worker(
         queue=queue,
         executor=None,  # type: ignore[arg-type]

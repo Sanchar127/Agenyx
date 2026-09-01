@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -29,9 +30,11 @@ class Settings:
             socket.gethostname(),
         )
 
-        self.valkey_sentinel_hosts = os.getenv(
-            "VALKEY_SENTINEL_HOSTS",
-            "valkey-sentinel:26379",
+        self.valkey_sentinel_hosts = self._parse_sentinel_hosts(
+            os.getenv(
+                "VALKEY_SENTINEL_HOSTS",
+                "",
+            ),
         )
 
         self.valkey_master_name = os.getenv(
@@ -91,7 +94,43 @@ class Settings:
             ),
         )
 
+    @staticmethod
+    def _parse_sentinel_hosts(
+        value: str,
+    ) -> list[tuple[str, int]]:
+        """Parse comma-separated Sentinel host:port values."""
+
+        hosts: list[tuple[str, int]] = []
+
+        if not value.strip():
+            return hosts
+
+        for address in value.split(","):
+            address = address.strip()
+
+            if not address:
+                continue
+
+            try:
+                host, port = address.rsplit(":", 1)
+
+                hosts.append(
+                    (
+                        host.strip(),
+                        int(port),
+                    )
+                )
+
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid VALKEY_SENTINEL_HOSTS entry: {address!r}"
+                ) from exc
+
+        return hosts
+
 
 @lru_cache
 def get_settings() -> Settings:
+    """Return cached worker settings."""
+
     return Settings()

@@ -3,7 +3,6 @@ kind: NetworkPolicy
 metadata:
   name: agenyx-valkey
   namespace: agenyx
-
 spec:
   podSelector:
     matchLabels:
@@ -13,29 +12,38 @@ spec:
     - Ingress
 
   ingress:
-    # Orchestrator
+    # Orchestrator -> Valkey
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agenyx-orchestrator
       ports:
-        - protocol: TCP
-          port: 6379
+        - port: 6379
+          protocol: TCP
 
-    # Worker
+    # Worker -> Valkey
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agenyx-worker
       ports:
-        - protocol: TCP
-          port: 6379
+        - port: 6379
+          protocol: TCP
 
-    # Router
+    # Router -> Valkey
     - from:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: agenyx-router
       ports:
-        - protocol: TCP
-          port: 6379
+        - port: 6379
+          protocol: TCP
+
+    # Sentinel -> Valkey
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey-sentinel
+      ports:
+        - port: 6379
+          protocol: TCP
