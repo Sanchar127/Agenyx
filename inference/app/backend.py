@@ -1,214 +1,870 @@
-import asyncio
-from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
-from typing import Any
+
+import json
 
 import httpx
+import pytest
+
+from app.backend import OpenAICompatibleBackend
 
 
-class InferenceBackend(ABC):
-    """Abstract interface for an inference backend."""
-
-    @abstractmethod
-    async def chat_completion(
-        self,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Execute a non-streaming chat completion request."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def chat_completion_stream(
-        self,
-        payload: dict[str, Any],
-    ) -> AsyncIterator[bytes]:
-        """Execute a streaming chat completion request."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def health(self) -> bool:
-        """Check whether the inference backend is available."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def close(self) -> None:
-        """Close backend resources."""
-        raise NotImplementedError
+# =========================================================
+# HELPERS
+# =========================================================
 
 
-class OpenAICompatibleBackend(InferenceBackend):
-    """HTTP client for an OpenAI-compatible inference backend."""
+def create_backend(
+    handler,
+    *,
+    max_retries: int = 2,
+) -> OpenAICompatibleBackend:
+    """
+    Create a backend using httpx.MockTransport.
 
-    def __init__(
-        self,
-        *,
-        base_url: str,
-        api_key: str,
-        timeout: float,
-        max_connections: int,
-        max_keepalive_connections: int,
-        max_retries: int = 2,
-    ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.max_retries = max_retries
+    No real network request is performed.
+    """
 
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                connect=min(timeout, 10.0),
-                read=timeout,
-                write=timeout,
-                pool=timeout,
-            ),
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_keepalive_connections,
-            ),
+    backend = OpenAICompatibleBackend(
+        base_url="http://test-backend/v1",
+        api_key="test-key",
+        timeout=10.0,
+        max_connections=10,
+        max_keepalive_connections=5,
+        max_retries=max_retries,
+    )
+
+    transport = httpx.MockTransport(handler)
+
+    # Replace the real transport with the mock transport.
+    backend.client._transport = transport
+
+    return backend
+
+
+def completion_payload(
+    model: str = "qwen2.5:7b",
+) -> dict:
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Hello",
+            }
+        ],
+    }
+
+
+# =========================================================
+# CONFIGURATION
+# =========================================================
+
+
+def test_invalid_base_url() -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleBackend(
+            base_url="",
+            api_key="test-key",
+            timeout=10.0,
+            max_connections=10,
+            max_keepalive_connections=5,
         )
 
-    @property
-    def headers(self) -> dict[str, str]:
-        """Build headers for provider requests."""
 
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+def test_invalid_timeout() -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleBackend(
+            base_url="http://test",
+            api_key="test-key",
+            timeout=0,
+            max_connections=10,
+            max_keepalive_connections=5,
+        )
 
-    async def chat_completion(
-        self,
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Send a non-streaming chat completion request."""
 
-        url = f"{self.base_url}/chat/completions"
+def test_invalid_max_connections() -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleBackend(
+            base_url="http://test",
+            api_key="test-key",
+            timeout=10,
+            max_connections=0,
+            max_keepalive_connections=0,
+        )
 
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = await self.client.post(
-                    url,
-                    json=payload,
-                    headers=self.headers,
-                )
 
-                # Never retry client errors.
-                if 400 <= response.status_code < 500:
-                    response.raise_for_status()
+def test_invalid_keepalive_connections() -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleBackend(
+            base_url="http://test",
+            api_key="test-key",
+            timeout=10,
+            max_connections=5,
+            max_keepalive_connections=10,
+        )
 
-                # Retry transient provider failures.
-                if response.status_code >= 500:
-                    if attempt >= self.max_retries:
-                        response.raise_for_status()
 
-                    await self._backoff(attempt)
-                    continue
+def test_invalid_max_retries() -> None:
+    with pytest.raises(ValueError):
+        OpenAICompatibleBackend(
+            base_url="http://test",
+            api_key="test-key",
+            timeout=10,
+            max_connections=10,
+            max_keepalive_connections=5,
+            max_retries=-1,
+        )
 
-                response.raise_for_status()
 
-                try:
-                    data = response.json()
-                except ValueError as exc:
-                    raise RuntimeError(
-                        "Inference backend returned invalid JSON"
-                    ) from exc
+# =========================================================
+# HEADERS
+# =========================================================
 
-                if not isinstance(data, dict):
-                    raise RuntimeError(
-                        "Inference backend returned a non-object JSON response"
-                    )
 
-                return data
+@pytest.mark.asyncio
+async def test_headers() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        assert request.headers["Authorization"] == (
+            "Bearer test-key"
+        )
 
-            except httpx.TimeoutException:
-                if attempt >= self.max_retries:
-                    raise
+        assert request.headers["Content-Type"] == (
+            "application/json"
+        )
 
-                await self._backoff(attempt)
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+            },
+        )
 
-            except httpx.ConnectError:
-                if attempt >= self.max_retries:
-                    raise
+    backend = create_backend(handler)
 
-                await self._backoff(attempt)
+    try:
+        response = await backend.chat_completion(
+            completion_payload()
+        )
 
-            except httpx.NetworkError:
-                if attempt >= self.max_retries:
-                    raise
+        assert response["id"] == "test"
 
-                await self._backoff(attempt)
+    finally:
+        await backend.close()
 
-        raise RuntimeError("Inference request failed")
 
-    async def chat_completion_stream(
-        self,
-        payload: dict[str, Any],
-    ) -> AsyncIterator[bytes]:
-        """
-        Stream an OpenAI-compatible chat completion response.
+# =========================================================
+# SUCCESS
+# =========================================================
 
-        The provider response is forwarded without buffering the
-        complete response in memory.
-        """
 
-        url = f"{self.base_url}/chat/completions"
+@pytest.mark.asyncio
+async def test_chat_completion_success() -> None:
+    calls = 0
 
-        # Streaming requests should not be retried after the response
-        # has started. Retrying could result in duplicated tokens.
-        try:
-            async with self.client.stream(
-                "POST",
-                url,
-                json=payload,
-                headers=self.headers,
-            ) as response:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
 
-                # Surface provider errors before yielding any data.
-                if response.status_code >= 400:
-                    body = await response.aread()
+        assert request.method == "POST"
+        assert str(request.url) == (
+            "http://test-backend/v1/chat/completions"
+        )
 
-                    error = httpx.Response(
-                        status_code=response.status_code,
-                        headers=response.headers,
-                        content=body,
-                        request=response.request,
-                    )
+        body = json.loads(request.content)
 
-                    error.raise_for_status()
+        assert body["model"] == "qwen2.5:7b"
+        assert body["messages"]
 
-                async for chunk in response.aiter_bytes():
-                    if chunk:
-                        yield chunk
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [],
+            },
+        )
 
-        except httpx.HTTPError:
-            raise
+    backend = create_backend(handler)
 
-    async def _backoff(
-        self,
-        attempt: int,
-    ) -> None:
-        """Apply exponential backoff between retries."""
+    try:
+        response = await backend.chat_completion(
+            completion_payload()
+        )
 
-        delay = 0.5 * (2**attempt)
-        await asyncio.sleep(delay)
+        assert response["id"] == "chatcmpl-test"
+        assert calls == 1
 
-    async def health(self) -> bool:
-        """Check whether the backend is reachable."""
+    finally:
+        await backend.close()
 
-        try:
-            response = await self.client.get(
-                f"{self.base_url}/models",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                },
+
+# =========================================================
+# CLIENT ERRORS
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_client_error_is_not_retried() -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Invalid request",
+                }
+            },
+        )
+
+    backend = create_backend(
+        handler,
+        max_retries=2,
+    )
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await backend.chat_completion(
+                completion_payload()
             )
 
-            return response.status_code < 500
+        assert calls == 1
 
-        except httpx.HTTPError:
-            return False
+    finally:
+        await backend.close()
 
-    async def close(self) -> None:
-        """Close the HTTP client."""
 
-        if not self.client.is_closed:
-            await self.client.aclose()
+# =========================================================
+# SERVER RETRIES
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_server_error_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        if calls < 3:
+            return httpx.Response(503)
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "recovered",
+            },
+        )
+
+    backend = create_backend(
+        handler,
+        max_retries=2,
+    )
+
+    async def no_sleep(
+        delay: float,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend,
+        "_backoff",
+        no_sleep,
+    )
+
+    try:
+        response = await backend.chat_completion(
+            completion_payload()
+        )
+
+        assert response["id"] == "recovered"
+        assert calls == 3
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_retries_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        return httpx.Response(503)
+
+    backend = create_backend(
+        handler,
+        max_retries=2,
+    )
+
+    async def no_sleep(
+        delay: float,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend,
+        "_backoff",
+        no_sleep,
+    )
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await backend.chat_completion(
+                completion_payload()
+            )
+
+        # Initial request + 2 retries.
+        assert calls == 3
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# TIMEOUT
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        if calls == 1:
+            raise httpx.ReadTimeout(
+                "backend timeout",
+                request=request,
+            )
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "after-timeout",
+            },
+        )
+
+    backend = create_backend(
+        handler,
+        max_retries=1,
+    )
+
+    async def no_sleep(
+        delay: float,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend,
+        "_backoff",
+        no_sleep,
+    )
+
+    try:
+        response = await backend.chat_completion(
+            completion_payload()
+        )
+
+        assert response["id"] == "after-timeout"
+        assert calls == 2
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# NETWORK FAILURE
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_network_error_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        if calls == 1:
+            raise httpx.ConnectError(
+                "connection failed",
+                request=request,
+            )
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "connected",
+            },
+        )
+
+    backend = create_backend(
+        handler,
+        max_retries=1,
+    )
+
+    async def no_sleep(
+        delay: float,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend,
+        "_backoff",
+        no_sleep,
+    )
+
+    try:
+        response = await backend.chat_completion(
+            completion_payload()
+        )
+
+        assert response["id"] == "connected"
+        assert calls == 2
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_network_error_after_all_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        raise httpx.ConnectError(
+            "connection failed",
+            request=request,
+        )
+
+    backend = create_backend(
+        handler,
+        max_retries=2,
+    )
+
+    async def no_sleep(
+        delay: float,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(
+        backend,
+        "_backoff",
+        no_sleep,
+    )
+
+    try:
+        with pytest.raises(httpx.ConnectError):
+            await backend.chat_completion(
+                completion_payload()
+            )
+
+        assert calls == 3
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# RESPONSE VALIDATION
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_response() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b"not-json",
+        )
+
+    backend = create_backend(handler)
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="invalid JSON",
+        ):
+            await backend.chat_completion(
+                completion_payload()
+            )
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_non_object_json_response() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                "not",
+                "an",
+                "object",
+            ],
+        )
+
+    backend = create_backend(handler)
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="non-object JSON",
+        ):
+            await backend.chat_completion(
+                completion_payload()
+            )
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# INVALID PAYLOAD
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_rejects_invalid_payload() -> None:
+    backend = create_backend(
+        lambda request: httpx.Response(200)
+    )
+
+    try:
+        with pytest.raises(TypeError):
+            await backend.chat_completion(
+                "invalid"  # type: ignore[arg-type]
+            )
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# BACKOFF
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_backoff_uses_exponential_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(
+        delay: float,
+    ) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        asyncio,
+        "sleep",
+        fake_sleep,
+    )
+
+    # Remove randomness for deterministic test.
+    monkeypatch.setattr(
+        random,
+        "uniform",
+        lambda start, end: 0.0,
+    )
+
+    backend = OpenAICompatibleBackend(
+        base_url="http://test",
+        api_key="test",
+        timeout=10,
+        max_connections=10,
+        max_keepalive_connections=5,
+    )
+
+    try:
+        await backend._backoff(0)
+        await backend._backoff(1)
+        await backend._backoff(2)
+
+        assert delays == [
+            0.5,
+            1.0,
+            2.0,
+        ]
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# STREAMING
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_streaming_success() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"delta":"Hello"}\n\n'
+                b'data: {"delta":" world"}\n\n'
+            ),
+            headers={
+                "Content-Type": "text/event-stream",
+            },
+        )
+
+    backend = create_backend(handler)
+
+    chunks: list[bytes] = []
+
+    try:
+        async for chunk in backend.chat_completion_stream(
+            completion_payload()
+        ):
+            chunks.append(chunk)
+
+        body = b"".join(chunks)
+
+        assert b"Hello" in body
+        assert b"world" in body
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_client_error() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": "Bad request",
+                }
+            },
+        )
+
+    backend = create_backend(handler)
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in backend.chat_completion_stream(
+                completion_payload()
+            ):
+                pass
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_server_error() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(
+            503,
+            json={
+                "error": {
+                    "message": "Unavailable",
+                }
+            },
+        )
+
+    backend = create_backend(handler)
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in backend.chat_completion_stream(
+                completion_payload()
+            ):
+                pass
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_streaming_does_not_retry() -> None:
+    calls = 0
+
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+
+        return httpx.Response(
+            503,
+            json={
+                "error": {
+                    "message": "Unavailable",
+                }
+            },
+        )
+
+    backend = create_backend(
+        handler,
+        max_retries=3,
+    )
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            async for _ in backend.chat_completion_stream(
+                completion_payload()
+            ):
+                pass
+
+        # Streaming intentionally performs only one request.
+        assert calls == 1
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# HEALTH
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_health_success() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        assert request.method == "GET"
+        assert str(request.url) == (
+            "http://test-backend/v1/models"
+        )
+
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [],
+            },
+        )
+
+    backend = create_backend(handler)
+
+    try:
+        assert await backend.health() is True
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_health_failure_on_server_error() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        return httpx.Response(503)
+
+    backend = create_backend(handler)
+
+    try:
+        assert await backend.health() is False
+
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_health_failure_on_network_error() -> None:
+    async def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        raise httpx.ConnectError(
+            "backend unavailable",
+            request=request,
+        )
+
+    backend = create_backend(handler)
+
+    try:
+        assert await backend.health() is False
+
+    finally:
+        await backend.close()
+
+
+# =========================================================
+# CLOSE
+# =========================================================
+
+
+@pytest.mark.asyncio
+async def test_close() -> None:
+    backend = OpenAICompatibleBackend(
+        base_url="http://test",
+        api_key="test",
+        timeout=10,
+        max_connections=10,
+        max_keepalive_connections=5,
+    )
+
+    assert backend.client.is_closed is False
+
+    await backend.close()
+
+    assert backend.client.is_closed is True
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent() -> None:
+    backend = OpenAICompatibleBackend(
+        base_url="http://test",
+        api_key="test",
+        timeout=10,
+        max_connections=10,
+        max_keepalive_connections=5,
+    )
+
+    await backend.close()
+    await backend.close()
+
+    assert backend.client.is_closed is True

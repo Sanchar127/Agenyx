@@ -1,6 +1,7 @@
 from typing import Any
 
 from app.backend import OpenAICompatibleBackend
+from app.logger import logger
 
 from .base import InferenceProvider
 
@@ -51,6 +52,15 @@ class OpenAICompatibleProvider(InferenceProvider):
             max_retries=max_retries,
         )
 
+        logger.info(
+            "Inference provider initialized",
+            extra={
+                "provider": self._name,
+                "backend": "openai-compatible",
+                "base_url": base_url,
+            },
+        )
+
     @property
     def name(self) -> str:
         """Return the unique provider name."""
@@ -71,21 +81,90 @@ class OpenAICompatibleProvider(InferenceProvider):
         model = payload.get("model")
 
         if not isinstance(model, str) or not model.strip():
+            logger.warning(
+                "Provider received invalid model",
+                extra={
+                    "provider": self._name,
+                },
+            )
+
             raise ValueError(
                 "Chat completion payload must contain "
                 "a non-empty 'model' field"
             )
 
-        return await self.backend.chat_completion(
-            payload
+        logger.info(
+            "Provider inference request started",
+            extra={
+                "provider": self._name,
+                "model": model,
+            },
         )
+
+        try:
+            response = await self.backend.chat_completion(
+                payload
+            )
+
+        except Exception:
+            logger.error(
+                "Provider inference request failed",
+                extra={
+                    "provider": self._name,
+                    "model": model,
+                },
+                exc_info=True,
+            )
+
+            raise
+
+        logger.info(
+            "Provider inference request completed",
+            extra={
+                "provider": self._name,
+                "model": model,
+            },
+        )
+
+        return response
 
     async def health(self) -> bool:
         """Check whether the provider backend is reachable."""
 
-        return await self.backend.health()
+        healthy = await self.backend.health()
+
+        if healthy:
+            logger.debug(
+                "Provider health check passed",
+                extra={
+                    "provider": self._name,
+                },
+            )
+        else:
+            logger.warning(
+                "Provider health check failed",
+                extra={
+                    "provider": self._name,
+                },
+            )
+
+        return healthy
 
     async def close(self) -> None:
         """Release provider resources."""
 
+        logger.info(
+            "Closing inference provider",
+            extra={
+                "provider": self._name,
+            },
+        )
+
         await self.backend.close()
+
+        logger.info(
+            "Inference provider closed",
+            extra={
+                "provider": self._name,
+            },
+        )

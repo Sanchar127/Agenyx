@@ -3,15 +3,14 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-
+import time
 from app.config import get_settings
 from app.failover.manager import FailoverManager
 from app.models import ModelDefinition, ModelRegistry
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
-
-
+from app.logger import logger
 settings = get_settings()
 
 provider_registry = ProviderRegistry()
@@ -90,10 +89,20 @@ async def lifespan(app: FastAPI):
     Application lifecycle.
     """
 
+    logger.info(
+        "Inference service starting",
+        extra={
+            "app_name": settings.app_name,
+            "app_version": settings.app_version,
+            "providers": settings.providers,
+            "default_model": settings.default_model,
+        },
+    )
+
     yield
-
+    logger.info("Inference service shutting down")
     await provider_registry.close()
-
+    logger.info("Inference providers closed")
 
 app = FastAPI(
     title=settings.app_name,
@@ -141,7 +150,12 @@ async def ready() -> dict[str, Any]:
                 "status": "ready",
                 "provider": provider.name,
             }
-
+    logger.warning(
+        "Inference service not ready: no providers available",
+        extra={
+            "providers": settings.providers,
+        },
+    )
     raise HTTPException(
         status_code=503,
         detail="No inference providers available",
@@ -169,6 +183,13 @@ async def providers() -> dict[str, Any]:
         ],
     }
 
+    logger.info(
+    "Inference providers registered",
+    extra={
+        "providers": provider_registry.list(),
+    },
+    )
+
 
 # =========================================================
 # MODELS
@@ -192,6 +213,15 @@ async def models() -> dict[str, Any]:
         ],
     }
 
+    logger.info(
+    "Inference models registered",
+    extra={
+        "models": [
+            model.model_id
+            for model in model_registry.list_models()
+            ],
+        },
+    )
 
 # =========================================================
 # CHAT COMPLETIONS
@@ -223,12 +253,18 @@ async def chat_completions(
           ↓
         response
     """
-
+    start_time = time.perf_counter()
     # -----------------------------------------------------
     # Parse JSON
     # -----------------------------------------------------
-
-    try:
+    logger.info(
+        "Inference request received",
+        extra={
+            "model": model.model_id,
+            "provider": model.provider_name,
+        },
+    )
+        try:
         payload = await request.json()
 
     except Exception as exc:

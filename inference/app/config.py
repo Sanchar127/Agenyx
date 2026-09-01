@@ -8,6 +8,8 @@ class Settings(BaseSettings):
 
     app_name: str = "agenyx-inference"
     app_version: str = "0.1.0"
+    log_level: str = "INFO"
+    log_json: bool = True
 
     # -----------------------------------------------------
     # Provider configuration

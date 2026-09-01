@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from threading import Lock
 
+from app.logger import logger
 from app.reliability.state import (
     CircuitState,
     ProviderHealthState,
@@ -68,6 +69,25 @@ class ReliabilityManager:
 
         self._lock = Lock()
 
+        logger.info(
+            "Reliability manager initialized",
+            extra={
+                "degraded_failure_threshold": (
+                    degraded_failure_threshold
+                ),
+                "unhealthy_failure_threshold": (
+                    unhealthy_failure_threshold
+                ),
+                "recovery_timeout_seconds": (
+                    recovery_timeout_seconds
+                ),
+            },
+        )
+
+    # =====================================================
+    # REGISTRATION
+    # =====================================================
+
     def register(self, provider_name: str) -> None:
         """
         Register a provider for reliability tracking.
@@ -75,6 +95,13 @@ class ReliabilityManager:
 
         with self._lock:
             if provider_name in self._states:
+                logger.error(
+                    "Provider already registered",
+                    extra={
+                        "provider": provider_name,
+                    },
+                )
+
                 raise ValueError(
                     f"Provider already registered: {provider_name}"
                 )
@@ -83,7 +110,23 @@ class ReliabilityManager:
                 provider_name=provider_name,
             )
 
-    def get(self, provider_name: str) -> ProviderHealthState:
+        logger.info(
+            "Provider registered for reliability tracking",
+            extra={
+                "provider": provider_name,
+                "status": ProviderStatus.HEALTHY.value,
+                "circuit_state": CircuitState.CLOSED.value,
+            },
+        )
+
+    # =====================================================
+    # STATE
+    # =====================================================
+
+    def get(
+        self,
+        provider_name: str,
+    ) -> ProviderHealthState:
         """
         Return the current provider state.
         """
@@ -93,11 +136,25 @@ class ReliabilityManager:
                 return self._states[provider_name]
 
             except KeyError as exc:
+                logger.error(
+                    "Provider reliability state not found",
+                    extra={
+                        "provider": provider_name,
+                    },
+                )
+
                 raise KeyError(
                     f"Provider is not registered: {provider_name}"
                 ) from exc
 
-    def allow_request(self, provider_name: str) -> bool:
+    # =====================================================
+    # CIRCUIT BREAKER
+    # =====================================================
+
+    def allow_request(
+        self,
+        provider_name: str,
+    ) -> bool:
         """
         Determine whether a request may be sent to the provider.
 
@@ -114,8 +171,16 @@ class ReliabilityManager:
         with self._lock:
             state = self._get_state(provider_name)
 
+            # -------------------------------------------------
+            # CLOSED
+            # -------------------------------------------------
+
             if state.circuit_state == CircuitState.CLOSED:
                 return True
+
+            # -------------------------------------------------
+            # OPEN
+            # -------------------------------------------------
 
             if state.circuit_state == CircuitState.OPEN:
                 now = datetime.now(timezone.utc)
@@ -129,23 +194,83 @@ class ReliabilityManager:
                     state.circuit_half_opened_at = now
 
                     if provider_name in self._half_open_probe:
+                        logger.debug(
+                            "Provider recovery probe already in progress",
+                            extra={
+                                "provider": provider_name,
+                                "circuit_state": (
+                                    CircuitState.HALF_OPEN.value
+                                ),
+                            },
+                        )
+
                         return False
 
                     self._half_open_probe.add(provider_name)
 
+                    logger.info(
+                        "Provider circuit entering half-open state",
+                        extra={
+                            "provider": provider_name,
+                            "circuit_state": (
+                                CircuitState.HALF_OPEN.value
+                            ),
+                        },
+                    )
+
                     return True
+
+                logger.debug(
+                    "Request rejected because provider circuit is open",
+                    extra={
+                        "provider": provider_name,
+                        "circuit_state": (
+                            CircuitState.OPEN.value
+                        ),
+                    },
+                )
 
                 return False
 
-            # HALF_OPEN
+            # -------------------------------------------------
+            # HALF OPEN
+            # -------------------------------------------------
+
             if provider_name in self._half_open_probe:
+                logger.debug(
+                    "Provider half-open probe already in progress",
+                    extra={
+                        "provider": provider_name,
+                        "circuit_state": (
+                            CircuitState.HALF_OPEN.value
+                        ),
+                    },
+                )
+
                 return False
 
             self._half_open_probe.add(provider_name)
 
+            logger.info(
+                "Provider recovery probe allowed",
+                extra={
+                    "provider": provider_name,
+                    "circuit_state": (
+                        CircuitState.HALF_OPEN.value
+                    ),
+                },
+            )
+
             return True
 
-    def record_success(self, provider_name: str) -> None:
+    # =====================================================
+    # SUCCESS
+    # =====================================================
+
+    def record_success(
+        self,
+        provider_name: str,
+    ) -> None:
         """
         Record a successful request.
 
@@ -154,6 +279,9 @@ class ReliabilityManager:
 
         with self._lock:
             state = self._get_state(provider_name)
+
+            previous_status = state.status
+            previous_circuit_state = state.circuit_state
 
             now = datetime.now(timezone.utc)
 
@@ -169,11 +297,41 @@ class ReliabilityManager:
 
             self._half_open_probe.discard(provider_name)
 
-    def record_failure(self, provider_name: str) -> None:
+        # Log recovery/state transition rather than every
+        # successful inference request.
+        if (
+            previous_status != ProviderStatus.HEALTHY
+            or previous_circuit_state != CircuitState.CLOSED
+        ):
+            logger.info(
+                "Provider recovered",
+                extra={
+                    "provider": provider_name,
+                    "previous_status": previous_status.value,
+                    "status": ProviderStatus.HEALTHY.value,
+                    "previous_circuit_state": (
+                        previous_circuit_state.value
+                    ),
+                    "circuit_state": (
+                        CircuitState.CLOSED.value
+                    ),
+                    "total_successes": state.total_successes,
+                },
+            )
+
+    # =====================================================
+    # FAILURE
+    # =====================================================
+
+    def record_failure(
+        self,
+        provider_name: str,
+    ) -> None:
         """
         Record a failed request.
 
         Once the failure threshold is reached, the circuit opens.
+
         A failed HALF_OPEN probe immediately reopens the circuit.
         """
 
@@ -182,19 +340,54 @@ class ReliabilityManager:
 
             now = datetime.now(timezone.utc)
 
+            previous_status = state.status
+            previous_circuit_state = state.circuit_state
+
             state.total_failures += 1
             state.consecutive_failures += 1
             state.last_failure_at = now
 
             self._half_open_probe.discard(provider_name)
 
-            # A failed HALF_OPEN probe goes straight back to OPEN.
+            # -------------------------------------------------
+            # Failed HALF_OPEN probe
+            # -------------------------------------------------
+
             if state.circuit_state == CircuitState.HALF_OPEN:
                 state.circuit_state = CircuitState.OPEN
                 state.circuit_opened_at = now
                 state.status = ProviderStatus.UNHEALTHY
 
+                logger.warning(
+                    "Provider recovery probe failed; circuit reopened",
+                    extra={
+                        "provider": provider_name,
+                        "previous_status": (
+                            previous_status.value
+                        ),
+                        "status": (
+                            ProviderStatus.UNHEALTHY.value
+                        ),
+                        "previous_circuit_state": (
+                            previous_circuit_state.value
+                        ),
+                        "circuit_state": (
+                            CircuitState.OPEN.value
+                        ),
+                        "consecutive_failures": (
+                            state.consecutive_failures
+                        ),
+                        "total_failures": (
+                            state.total_failures
+                        ),
+                    },
+                )
+
                 return
+
+            # -------------------------------------------------
+            # UNHEALTHY
+            # -------------------------------------------------
 
             if (
                 state.consecutive_failures
@@ -204,13 +397,62 @@ class ReliabilityManager:
                 state.circuit_state = CircuitState.OPEN
                 state.circuit_opened_at = now
 
+                logger.warning(
+                    "Provider marked unhealthy; circuit opened",
+                    extra={
+                        "provider": provider_name,
+                        "status": (
+                            ProviderStatus.UNHEALTHY.value
+                        ),
+                        "circuit_state": (
+                            CircuitState.OPEN.value
+                        ),
+                        "consecutive_failures": (
+                            state.consecutive_failures
+                        ),
+                        "total_failures": (
+                            state.total_failures
+                        ),
+                    },
+                )
+
+            # -------------------------------------------------
+            # DEGRADED
+            # -------------------------------------------------
+
             elif (
                 state.consecutive_failures
                 >= self.degraded_failure_threshold
             ):
                 state.status = ProviderStatus.DEGRADED
 
-    def is_available(self, provider_name: str) -> bool:
+                logger.warning(
+                    "Provider marked degraded",
+                    extra={
+                        "provider": provider_name,
+                        "status": (
+                            ProviderStatus.DEGRADED.value
+                        ),
+                        "circuit_state": (
+                            state.circuit_state.value
+                        ),
+                        "consecutive_failures": (
+                            state.consecutive_failures
+                        ),
+                        "total_failures": (
+                            state.total_failures
+                        ),
+                    },
+                )
+
+    # =====================================================
+    # AVAILABILITY
+    # =====================================================
+
+    def is_available(
+        self,
+        provider_name: str,
+    ) -> bool:
         """
         Backwards-compatible availability check.
 
@@ -218,6 +460,10 @@ class ReliabilityManager:
         """
 
         return self.allow_request(provider_name)
+
+    # =====================================================
+    # SNAPSHOTS
+    # =====================================================
 
     def list_states(self) -> list[ProviderHealthState]:
         """
@@ -240,6 +486,10 @@ class ReliabilityManager:
                 )
                 for state in self._states.values()
             ]
+
+    # =====================================================
+    # INTERNAL
+    # =====================================================
 
     def _get_state(
         self,

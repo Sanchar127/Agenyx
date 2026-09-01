@@ -89,8 +89,17 @@ services:
     environment:
       INFERENCE_BACKEND_BASE_URL: http://host.docker.internal:11434/v1
       INFERENCE_BACKEND_API_KEY: ollama
-      INFERENCE_MODEL: qwen2.5:7b
+
+      INFERENCE_DEFAULT_MODEL: qwen2.5:7b
+
+      INFERENCE_PROVIDER_NAMES: ollama-local
+
       INFERENCE_REQUEST_TIMEOUT_SECONDS: "120"
+      INFERENCE_MAX_RETRIES: "2"
+      INFERENCE_MAX_CONNECTIONS: "100"
+      INFERENCE_MAX_KEEPALIVE_CONNECTIONS: "20"
+      INFERENCE_MAX_FAILOVER_ATTEMPTS: "3"
+
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
