@@ -1,6 +1,6 @@
-
 import asyncio
 import random
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
@@ -8,6 +8,12 @@ from typing import Any
 import httpx
 
 from app.logger import logger
+from app.metrics import (
+    PROVIDER_ERRORS_TOTAL,
+    PROVIDER_REQUEST_DURATION_SECONDS,
+    PROVIDER_REQUESTS_TOTAL,
+    PROVIDER_RETRIES_TOTAL,
+)
 
 
 class InferenceBackend(ABC):
@@ -36,69 +42,69 @@ class InferenceBackend(ABC):
 
     @abstractmethod
     async def health(self) -> bool:
-        """Check whether the inference backend is available."""
+        """Check backend health."""
         raise NotImplementedError
 
     @abstractmethod
     async def close(self) -> None:
-        """Release backend resources."""
+        """Close backend resources."""
         raise NotImplementedError
 
 
 class OpenAICompatibleBackend(InferenceBackend):
     """
-    HTTP client for an OpenAI-compatible inference backend.
+    HTTP backend for OpenAI-compatible inference APIs.
 
-    This class is responsible only for backend communication.
+    Compatible with providers such as:
 
-    It does NOT handle:
-
-    - model registration
-    - provider selection
-    - provider failover
-    - circuit breaking
-    - FastAPI request handling
-    - authentication of Agenyx clients
+    - Ollama
+    - vLLM
+    - OpenAI
+    - Other OpenAI-compatible servers
     """
 
-    RETRYABLE_STATUS_CODES = frozenset(
-        {
-            500,
-            502,
-            503,
-            504,
-        }
-    )
-
-    MAX_BACKOFF_JITTER_SECONDS = 0.25
+    RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+    MAX_BACKOFF_JITTER = 0.25
 
     def __init__(
         self,
         *,
+        provider_name: str,
         base_url: str,
-        api_key: str,
-        timeout: float,
-        max_connections: int,
-        max_keepalive_connections: int,
+        api_key: str | None = None,
+        timeout: float = 60.0,
         max_retries: int = 2,
+        max_connections: int = 100,
+        max_keepalive_connections: int = 20,
     ) -> None:
-        """
-        Create an OpenAI-compatible HTTP backend.
-        """
+        if not provider_name:
+            raise ValueError("provider_name must not be empty")
 
-        self._validate_configuration(
-            base_url=base_url,
-            timeout=timeout,
-            max_connections=max_connections,
-            max_keepalive_connections=max_keepalive_connections,
-            max_retries=max_retries,
-        )
+        if not base_url:
+            raise ValueError("base_url must not be empty")
 
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+
+        if max_connections <= 0:
+            raise ValueError("max_connections must be greater than zero")
+
+        if max_keepalive_connections <= 0:
+            raise ValueError(
+                "max_keepalive_connections must be greater than zero"
+            )
+
+        self.provider_name = provider_name
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        self.timeout = timeout
         self.max_retries = max_retries
 
-        self.client = httpx.AsyncClient(
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
             timeout=httpx.Timeout(
                 connect=min(timeout, 10.0),
                 read=timeout,
@@ -111,229 +117,137 @@ class OpenAICompatibleBackend(InferenceBackend):
             ),
         )
 
-        logger.info(
-            "Inference backend initialized",
-            extra={
-                "backend_url": self.base_url,
-                "max_retries": self.max_retries,
-                "max_connections": max_connections,
-                "max_keepalive_connections": (
-                    max_keepalive_connections
-                ),
-            },
-        )
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Public alias for the underlying HTTP client (used by tests)."""
+        return self._client
 
-    # =====================================================
-    # CONFIGURATION
-    # =====================================================
-
-    @staticmethod
-    def _validate_configuration(
-        *,
-        base_url: str,
-        timeout: float,
-        max_connections: int,
-        max_keepalive_connections: int,
-        max_retries: int,
-    ) -> None:
-        """
-        Validate backend configuration.
-        """
-
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError(
-                "base_url must be a non-empty string"
-            )
-
-        if timeout <= 0:
-            raise ValueError(
-                "timeout must be greater than 0"
-            )
-
-        if max_connections < 1:
-            raise ValueError(
-                "max_connections must be >= 1"
-            )
-
-        if max_keepalive_connections < 0:
-            raise ValueError(
-                "max_keepalive_connections must be >= 0"
-            )
-
-        if max_keepalive_connections > max_connections:
-            raise ValueError(
-                "max_keepalive_connections must be <= "
-                "max_connections"
-            )
-
-        if max_retries < 0:
-            raise ValueError(
-                "max_retries must be >= 0"
-            )
-
-    # =====================================================
-    # HEADERS
-    # =====================================================
+    @client.setter
+    def client(self, value: httpx.AsyncClient) -> None:
+        self._client = value
 
     @property
     def headers(self) -> dict[str, str]:
-        """
-        Build headers for provider requests.
-        """
-
-        return {
-            "Authorization": f"Bearer {self.api_key}",
+        """Return HTTP headers for provider requests."""
+        headers = {
             "Content-Type": "application/json",
+            "Accept": "application/json",
         }
 
-    # =====================================================
-    # CHAT COMPLETION
-    # =====================================================
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        return headers
 
     async def chat_completion(
         self,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Send a non-streaming chat completion request.
+        Execute a non-streaming chat completion request.
 
-        Retry policy:
+        Retry behavior:
 
-            2xx
-                Return response.
-
-            4xx
-                Do not retry.
-
-            5xx
-                Retry transient server failures.
-
-            timeout
-                Retry.
-
-            connection/network failure
-                Retry.
-
-        Retries use exponential backoff with jitter.
+        - 4xx errors are not retried.
+        - 5xx errors are retried.
+        - Network errors are retried.
+        - Timeout errors are retried.
         """
 
         if not isinstance(payload, dict):
-            raise TypeError(
-                "payload must be a dictionary"
-            )
+            raise TypeError("payload must be a dictionary")
 
-        url = f"{self.base_url}/chat/completions"
-
-        model = payload.get("model", "unknown")
-
-        logger.info(
-            "Backend inference request started",
-            extra={
-                "model": model,
-                "max_retries": self.max_retries,
-            },
-        )
+        model = str(payload.get("model", "unknown"))
 
         for attempt in range(self.max_retries + 1):
+            started_at = time.perf_counter()
+
             try:
-                response = await self.client.post(
-                    url,
-                    json=payload,
+                response = await self._client.post(
+                    f"{self.base_url}/chat/completions",
                     headers=self.headers,
+                    json=payload,
                 )
 
-                # -------------------------------------------------
-                # Client errors
-                # -------------------------------------------------
+                duration = time.perf_counter() - started_at
 
-                if 400 <= response.status_code < 500:
-                    logger.warning(
-                        "Backend returned client error",
-                        extra={
-                            "model": model,
-                            "status_code": response.status_code,
-                            "attempt": attempt,
-                        },
-                    )
+                PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                    provider=self.provider_name,
+                    model=model,
+                ).observe(duration)
+
+                if response.status_code in self.RETRYABLE_STATUS_CODES:
+                    PROVIDER_REQUESTS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        status="retryable_error",
+                    ).inc()
+
+                    if attempt < self.max_retries:
+                        PROVIDER_RETRIES_TOTAL.labels(
+                            provider=self.provider_name,
+                            model=model,
+                            reason=f"http_{response.status_code}",
+                        ).inc()
+
+                        await self._backoff(attempt)
+                        continue
+
+                    PROVIDER_ERRORS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        error_type=f"http_{response.status_code}",
+                    ).inc()
 
                     response.raise_for_status()
 
-                # -------------------------------------------------
-                # Transient provider errors
-                # -------------------------------------------------
+                if 400 <= response.status_code < 500:
+                    PROVIDER_REQUESTS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        status="client_error",
+                    ).inc()
 
-                if response.status_code in self.RETRYABLE_STATUS_CODES:
-                    logger.warning(
-                        "Backend returned retryable error",
-                        extra={
-                            "model": model,
-                            "status_code": response.status_code,
-                            "attempt": attempt,
-                            "max_retries": self.max_retries,
-                        },
-                    )
-
-                    if attempt >= self.max_retries:
-                        logger.error(
-                            "Backend request failed after retries",
-                            extra={
-                                "model": model,
-                                "status_code": response.status_code,
-                                "attempt": attempt,
-                            },
-                        )
-
-                        response.raise_for_status()
-
-                    await self._backoff(attempt)
-                    continue
-
-                # -------------------------------------------------
-                # Unexpected status codes
-                # -------------------------------------------------
+                    response.raise_for_status()
 
                 response.raise_for_status()
 
-                # -------------------------------------------------
-                # Parse response
-                # -------------------------------------------------
-
                 try:
                     data = response.json()
-
                 except ValueError as exc:
-                    logger.error(
-                        "Backend returned invalid JSON",
-                        extra={
-                            "model": model,
-                            "status_code": response.status_code,
-                        },
-                        exc_info=True,
-                    )
+                    PROVIDER_ERRORS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        error_type="invalid_json",
+                    ).inc()
 
                     raise RuntimeError(
-                        "Inference backend returned invalid JSON"
+                        "Inference provider returned invalid JSON"
                     ) from exc
 
                 if not isinstance(data, dict):
-                    logger.error(
-                        "Backend returned non-object JSON",
-                        extra={
-                            "model": model,
-                            "response_type": type(data).__name__,
-                        },
-                    )
+                    PROVIDER_ERRORS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        error_type="invalid_response",
+                    ).inc()
 
                     raise RuntimeError(
-                        "Inference backend returned a "
-                        "non-object JSON response"
+                        "Inference provider returned a non-object response"
                     )
 
-                logger.info(
-                    "Backend inference request completed",
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="success",
+                ).inc()
+
+                logger.debug(
+                    "Inference request completed",
                     extra={
+                        "provider": self.provider_name,
                         "model": model,
-                        "status_code": response.status_code,
+                        "duration_seconds": duration,
                         "attempt": attempt,
                     },
                 )
@@ -341,228 +255,294 @@ class OpenAICompatibleBackend(InferenceBackend):
                 return data
 
             except httpx.TimeoutException:
-                logger.warning(
-                    "Backend request timed out",
+                duration = time.perf_counter() - started_at
+
+                PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                    provider=self.provider_name,
+                    model=model,
+                ).observe(duration)
+
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type="timeout",
+                ).inc()
+
+                if attempt < self.max_retries:
+                    PROVIDER_RETRIES_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        reason="timeout",
+                    ).inc()
+
+                    await self._backoff(attempt)
+                    continue
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                raise
+
+            except httpx.RequestError:
+                duration = time.perf_counter() - started_at
+
+                PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                    provider=self.provider_name,
+                    model=model,
+                ).observe(duration)
+
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type="network_error",
+                ).inc()
+
+                if attempt < self.max_retries:
+                    PROVIDER_RETRIES_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        reason="network_error",
+                    ).inc()
+
+                    await self._backoff(attempt)
+                    continue
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                raise
+
+            except httpx.HTTPStatusError:
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type="http_error",
+                ).inc()
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                raise
+
+            except Exception as exc:
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type=type(exc).__name__,
+                ).inc()
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                logger.exception(
+                    "Unexpected inference provider error",
                     extra={
+                        "provider": self.provider_name,
                         "model": model,
-                        "attempt": attempt,
-                        "max_retries": self.max_retries,
                     },
                 )
 
-                if attempt >= self.max_retries:
-                    logger.error(
-                        "Backend request failed due to timeout",
-                        extra={
-                            "model": model,
-                            "attempt": attempt,
-                        },
-                        exc_info=True,
-                    )
-                    raise
-
-                await self._backoff(attempt)
-
-            except httpx.NetworkError:
-                logger.warning(
-                    "Backend network error",
-                    extra={
-                        "model": model,
-                        "attempt": attempt,
-                        "max_retries": self.max_retries,
-                    },
-                    exc_info=True,
-                )
-
-                if attempt >= self.max_retries:
-                    logger.error(
-                        "Backend request failed due to network error",
-                        extra={
-                            "model": model,
-                            "attempt": attempt,
-                        },
-                        exc_info=True,
-                    )
-                    raise
-
-                await self._backoff(attempt)
+                raise
 
         raise RuntimeError(
-            "Inference request failed after all retry attempts"
+            "Inference request failed after all retries"
         )
-
-    # =====================================================
-    # STREAMING
-    # =====================================================
 
     async def chat_completion_stream(
         self,
         payload: dict[str, Any],
     ) -> AsyncIterator[bytes]:
         """
-        Stream an OpenAI-compatible chat completion response.
+        Execute a streaming chat completion request.
 
-        Streaming requests are intentionally NOT retried.
+        Streaming requests are intentionally not retried because the
+        response may already have been partially consumed.
         """
 
         if not isinstance(payload, dict):
-            raise TypeError(
-                "payload must be a dictionary"
-            )
+            raise TypeError("payload must be a dictionary")
 
-        url = f"{self.base_url}/chat/completions"
-
-        model = payload.get("model", "unknown")
-
-        logger.info(
-            "Backend streaming request started",
-            extra={
-                "model": model,
-            },
-        )
+        model = str(payload.get("model", "unknown"))
+        started_at = time.perf_counter()
 
         try:
-            async with self.client.stream(
+            async with self._client.stream(
                 "POST",
-                url,
+                "/chat/completions",
+                headers={
+                    **self.headers,
+                    "Accept": "text/event-stream",
+                },
                 json=payload,
-                headers=self.headers,
             ) as response:
-
-                if response.status_code >= 400:
-                    logger.error(
-                        "Backend streaming request failed",
-                        extra={
-                            "model": model,
-                            "status_code": response.status_code,
-                        },
-                    )
-
-                    body = await response.aread()
-
-                    error_response = httpx.Response(
-                        status_code=response.status_code,
-                        headers=response.headers,
-                        content=body,
-                        request=response.request,
-                    )
-
-                    error_response.raise_for_status()
+                response.raise_for_status()
 
                 async for chunk in response.aiter_bytes():
                     if chunk:
                         yield chunk
 
-            logger.info(
-                "Backend streaming request completed",
-                extra={
-                    "model": model,
-                },
-            )
+            duration = time.perf_counter() - started_at
 
-        except httpx.HTTPError:
-            logger.error(
-                "Backend streaming HTTP error",
-                extra={
-                    "model": model,
-                },
-                exc_info=True,
-            )
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="success",
+            ).inc()
+
+        except httpx.TimeoutException:
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type="timeout",
+            ).inc()
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
+
             raise
 
-    # =====================================================
-    # RETRY BACKOFF
-    # =====================================================
+        except httpx.HTTPStatusError as exc:
+            duration = time.perf_counter() - started_at
 
-    async def _backoff(
-        self,
-        attempt: int,
-    ) -> None:
-        """
-        Apply exponential backoff with jitter.
-        """
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
 
-        base_delay = 0.5 * (2**attempt)
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type=f"http_{exc.response.status_code}",
+            ).inc()
 
-        jitter = random.uniform(
-            0,
-            self.MAX_BACKOFF_JITTER_SECONDS,
-        )
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
 
-        delay = base_delay + jitter
+            raise
 
-        logger.debug(
-            "Backend retry backoff",
-            extra={
-                "attempt": attempt,
-                "delay_seconds": round(delay, 3),
-            },
-        )
+        except httpx.RequestError:
+            duration = time.perf_counter() - started_at
 
-        await asyncio.sleep(delay)
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
 
-    # =====================================================
-    # HEALTH
-    # =====================================================
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type="network_error",
+            ).inc()
 
-    async def health(self) -> bool:
-        """
-        Check whether the backend is reachable.
-        """
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
 
-        try:
-            response = await self.client.get(
-                f"{self.base_url}/models",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
+            raise
+
+        except Exception as exc:
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type=type(exc).__name__,
+            ).inc()
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
+
+            logger.exception(
+                "Unexpected streaming inference provider error",
+                extra={
+                    "provider": self.provider_name,
+                    "model": model,
                 },
             )
 
-            healthy = response.is_success
+            raise
 
-            if healthy:
-                logger.debug(
-                    "Inference backend health check passed",
-                    extra={
-                        "status_code": response.status_code,
-                    },
-                )
-            else:
-                logger.warning(
-                    "Inference backend health check failed",
-                    extra={
-                        "status_code": response.status_code,
-                    },
-                )
+    async def health(self) -> bool:
+        """Check whether the provider is reachable."""
 
-            return healthy
+        try:
+            response = await self._client.get(
+                "/models",
+                headers=self.headers,
+            )
 
-        except httpx.HTTPError:
-            logger.warning(
-                "Inference backend health check failed",
-                exc_info=True,
+            return response.is_success
+
+        except (httpx.TimeoutException, httpx.RequestError):
+            return False
+
+        except Exception:
+            logger.exception(
+                "Inference provider health check failed",
+                extra={
+                    "provider": self.provider_name,
+                },
             )
 
             return False
 
-    # =====================================================
-    # CLOSE
-    # =====================================================
-
     async def close(self) -> None:
-        """
-        Close the underlying HTTP client.
+        """Close the HTTP client."""
 
-        Safe to call multiple times.
-        """
+        if not self._client.is_closed:
+            await self._client.aclose()
 
-        if not self.client.is_closed:
-            logger.info(
-                "Closing inference backend HTTP client",
-            )
+    async def _backoff(self, attempt: int) -> None:
+        """Wait using exponential backoff with jitter."""
 
-            await self.client.aclose()
+        delay = min(
+            0.5 * (2**attempt),
+            10.0,
+        )
 
-            logger.info(
-                "Inference backend HTTP client closed",
-            )
+        jitter = random.uniform(
+            0.0,
+            self.MAX_BACKOFF_JITTER,
+        )
+
+        await asyncio.sleep(delay + jitter)

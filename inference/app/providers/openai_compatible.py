@@ -44,12 +44,13 @@ class OpenAICompatibleProvider(InferenceProvider):
         self._name = provider_name
 
         self.backend = OpenAICompatibleBackend(
-            base_url=base_url,
-            api_key=api_key,
-            timeout=timeout,
-            max_connections=max_connections,
-            max_keepalive_connections=max_keepalive_connections,
-            max_retries=max_retries,
+        provider_name=provider_name,
+        base_url=base_url,
+        api_key=api_key,
+        timeout=timeout,
+        max_connections=max_connections,
+        max_keepalive_connections=max_keepalive_connections,
+        max_retries=max_retries,
         )
 
         logger.info(

@@ -60,6 +60,7 @@ async def test_provider_calls_backend():
 @pytest.mark.asyncio
 async def test_backend_sends_openai_compatible_request():
     backend = OpenAICompatibleBackend(
+        provider_name="test-provider",
         base_url="http://inference",
         api_key="test-key",
         timeout=5.0,

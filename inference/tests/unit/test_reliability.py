@@ -165,7 +165,11 @@ def test_success_closes_half_open_circuit(
 ):
     manager = registered_manager
 
-    state = manager.get("provider-a")
+    # Mutate the manager's real internal state directly.
+    # manager.get() returns a detached copy (by design, so
+    # callers can't mutate internal state without the lock),
+    # so mutating that copy would never be seen by allow_request.
+    state = manager._states["provider-a"]
 
     state.circuit_state = CircuitState.HALF_OPEN
 
@@ -245,7 +249,10 @@ def test_open_circuit_becomes_half_open_after_timeout(
     for _ in range(3):
         manager.record_failure("provider-a")
 
-    state = manager.get("provider-a")
+    # Mutate the manager's real internal state directly.
+    # manager.get() returns a detached copy, so mutating that
+    # copy's circuit_opened_at would never be seen by allow_request.
+    state = manager._states["provider-a"]
 
     state.circuit_opened_at = (
         datetime.now(timezone.utc)
@@ -268,7 +275,9 @@ def test_only_one_half_open_probe_allowed(
     for _ in range(3):
         manager.record_failure("provider-a")
 
-    state = manager.get("provider-a")
+    # Mutate the manager's real internal state directly (see note
+    # in test_open_circuit_becomes_half_open_after_timeout above).
+    state = manager._states["provider-a"]
 
     state.circuit_opened_at = (
         datetime.now(timezone.utc)
@@ -284,7 +293,9 @@ def test_failed_half_open_probe_reopens_circuit(
 ):
     manager = registered_manager
 
-    state = manager.get("provider-a")
+    # Mutate the manager's real internal state directly (see note
+    # in test_open_circuit_becomes_half_open_after_timeout above).
+    state = manager._states["provider-a"]
 
     state.circuit_state = CircuitState.HALF_OPEN
 

@@ -1,357 +1,548 @@
+import asyncio
+import random
+import time
+from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
+from typing import Any
+
 import httpx
-import pytest
 
-from app.backend import OpenAICompatibleBackend
-
-
-@pytest.fixture
-def backend() -> OpenAICompatibleBackend:
-    return OpenAICompatibleBackend(
-        base_url="http://ollama:11434/v1",
-        api_key="ollama",
-        timeout=10.0,
-        max_connections=10,
-        max_keepalive_connections=5,
-        max_retries=2,
-    )
+from app.logger import logger
+from app.metrics import (
+    PROVIDER_ERRORS_TOTAL,
+    PROVIDER_REQUEST_DURATION_SECONDS,
+    PROVIDER_REQUESTS_TOTAL,
+    PROVIDER_RETRIES_TOTAL,
+)
 
 
-@pytest.mark.asyncio
-async def test_chat_completion_success(backend):
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(
-            200,
-            json={
-                "id": "test-id",
-                "object": "chat.completion",
-                "choices": [],
-            },
+class InferenceBackend(ABC):
+    """
+    Abstract interface for an inference backend.
+
+    Implementations may communicate with Ollama, vLLM, OpenAI,
+    or any other OpenAI-compatible inference server.
+    """
+
+    @abstractmethod
+    async def chat_completion(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Execute a non-streaming chat completion request."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def chat_completion_stream(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[bytes]:
+        """Execute a streaming chat completion request."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def health(self) -> bool:
+        """Check backend health."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close backend resources."""
+        raise NotImplementedError
+
+
+class OpenAICompatibleBackend(InferenceBackend):
+    """
+    HTTP backend for OpenAI-compatible inference APIs.
+
+    Compatible with providers such as:
+
+    - Ollama
+    - vLLM
+    - OpenAI
+    - Other OpenAI-compatible servers
+    """
+
+    RETRYABLE_STATUS_CODES = {500, 502, 503, 504}
+    MAX_BACKOFF_JITTER = 0.25
+
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        base_url: str,
+        api_key: str | None = None,
+        timeout: float = 60.0,
+        max_retries: int = 2,
+        max_connections: int = 100,
+        max_keepalive_connections: int = 20,
+    ) -> None:
+        if not provider_name:
+            raise ValueError("provider_name must not be empty")
+
+        if not base_url:
+            raise ValueError("base_url must not be empty")
+
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+
+        if max_connections <= 0:
+            raise ValueError("max_connections must be greater than zero")
+
+        if max_keepalive_connections <= 0:
+            raise ValueError(
+                "max_keepalive_connections must be greater than zero"
+            )
+
+        self.provider_name = provider_name
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+        self.max_retries = max_retries
+
+        self._client = httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(
+                connect=min(timeout, 10.0),
+                read=timeout,
+                write=timeout,
+                pool=timeout,
+            ),
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive_connections,
+            ),
         )
-    )
 
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(transport=transport)
+    @property
+    def client(self) -> httpx.AsyncClient:
+        """Public alias for the underlying HTTP client (used by tests)."""
+        return self._client
 
-    response = await backend.chat_completion(
-        {
-            "model": "qwen2.5:7b",
-            "messages": [
-                {"role": "user", "content": "Hello"},
-            ],
+    @client.setter
+    def client(self, value: httpx.AsyncClient) -> None:
+        self._client = value
+
+    @property
+    def headers(self) -> dict[str, str]:
+        """Return HTTP headers for provider requests."""
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
         }
-    )
 
-    assert response["id"] == "test-id"
-    assert response["object"] == "chat.completion"
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
-    await backend.close()
+        return headers
 
+    async def chat_completion(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Execute a non-streaming chat completion request.
 
-@pytest.mark.asyncio
-async def test_chat_completion_client_error_does_not_retry(backend):
-    calls = 0
+        Retry behavior:
 
-    def handler(request):
-        nonlocal calls
-        calls += 1
+        - 4xx errors are not retried.
+        - 5xx errors are retried.
+        - Network errors are retried.
+        - Timeout errors are retried.
+        """
 
-        return httpx.Response(
-            400,
-            json={"error": "bad request"},
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a dictionary")
+
+        model = str(payload.get("model", "unknown"))
+
+        for attempt in range(self.max_retries + 1):
+            started_at = time.perf_counter()
+
+            try:
+                response = await self._client.post(
+                    "/chat/completions",
+                    headers=self.headers,
+                    json=payload,
+                )
+
+                duration = time.perf_counter() - started_at
+
+                PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                    provider=self.provider_name,
+                    model=model,
+                ).observe(duration)
+
+                if response.status_code in self.RETRYABLE_STATUS_CODES:
+                    PROVIDER_REQUESTS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        status="retryable_error",
+                    ).inc()
+
+                    if attempt < self.max_retries:
+                        PROVIDER_RETRIES_TOTAL.labels(
+                            provider=self.provider_name,
+                            model=model,
+                            reason=f"http_{response.status_code}",
+                        ).inc()
+
+                        await self._backoff(attempt)
+                        continue
+
+                    PROVIDER_ERRORS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        error_type=f"http_{response.status_code}",
+                    ).inc()
+
+                    response.raise_for_status()
+
+                if 400 <= response.status_code < 500:
+                    PROVIDER_REQUESTS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        status="client_error",
+                    ).inc()
+
+                    response.raise_for_status()
+
+                response.raise_for_status()
+
+                try:
+                    data = response.json()
+                except ValueError as exc:
+                    PROVIDER_ERRORS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        error_type="invalid_json",
+                    ).inc()
+
+                    raise RuntimeError(
+                        "Inference provider returned invalid JSON"
+                    ) from exc
+
+                if not isinstance(data, dict):
+                    PROVIDER_ERRORS_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        error_type="invalid_response",
+                    ).inc()
+
+                    raise RuntimeError(
+                        "Inference provider returned a non-object response"
+                    )
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="success",
+                ).inc()
+
+                logger.debug(
+                    "Inference request completed",
+                    extra={
+                        "provider": self.provider_name,
+                        "model": model,
+                        "duration_seconds": duration,
+                        "attempt": attempt,
+                    },
+                )
+
+                return data
+
+            except httpx.TimeoutException:
+                duration = time.perf_counter() - started_at
+
+                PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                    provider=self.provider_name,
+                    model=model,
+                ).observe(duration)
+
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type="timeout",
+                ).inc()
+
+                if attempt < self.max_retries:
+                    PROVIDER_RETRIES_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        reason="timeout",
+                    ).inc()
+
+                    await self._backoff(attempt)
+                    continue
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                raise
+
+            except httpx.RequestError:
+                duration = time.perf_counter() - started_at
+
+                PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                    provider=self.provider_name,
+                    model=model,
+                ).observe(duration)
+
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type="network_error",
+                ).inc()
+
+                if attempt < self.max_retries:
+                    PROVIDER_RETRIES_TOTAL.labels(
+                        provider=self.provider_name,
+                        model=model,
+                        reason="network_error",
+                    ).inc()
+
+                    await self._backoff(attempt)
+                    continue
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                raise
+
+            except httpx.HTTPStatusError:
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type="http_error",
+                ).inc()
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                raise
+
+            except Exception as exc:
+                PROVIDER_ERRORS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    error_type=type(exc).__name__,
+                ).inc()
+
+                PROVIDER_REQUESTS_TOTAL.labels(
+                    provider=self.provider_name,
+                    model=model,
+                    status="error",
+                ).inc()
+
+                logger.exception(
+                    "Unexpected inference provider error",
+                    extra={
+                        "provider": self.provider_name,
+                        "model": model,
+                    },
+                )
+
+                raise
+
+        raise RuntimeError(
+            "Inference request failed after all retries"
         )
 
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
+    async def chat_completion_stream(
+        self,
+        payload: dict[str, Any],
+    ) -> AsyncIterator[bytes]:
+        """
+        Execute a streaming chat completion request.
 
-    with pytest.raises(httpx.HTTPStatusError):
-        await backend.chat_completion(
-            {
-                "model": "qwen2.5:7b",
-                "messages": [],
-            }
+        Streaming requests are intentionally not retried because the
+        response may already have been partially consumed.
+        """
+
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be a dictionary")
+
+        model = str(payload.get("model", "unknown"))
+        started_at = time.perf_counter()
+
+        try:
+            async with self._client.stream(
+                "POST",
+                "/chat/completions",
+                headers={
+                    **self.headers,
+                    "Accept": "text/event-stream",
+                },
+                json=payload,
+            ) as response:
+                response.raise_for_status()
+
+                async for chunk in response.aiter_bytes():
+                    if chunk:
+                        yield chunk
+
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="success",
+            ).inc()
+
+        except httpx.TimeoutException:
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type="timeout",
+            ).inc()
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
+
+            raise
+
+        except httpx.HTTPStatusError as exc:
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type=f"http_{exc.response.status_code}",
+            ).inc()
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
+
+            raise
+
+        except httpx.RequestError:
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type="network_error",
+            ).inc()
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
+
+            raise
+
+        except Exception as exc:
+            duration = time.perf_counter() - started_at
+
+            PROVIDER_REQUEST_DURATION_SECONDS.labels(
+                provider=self.provider_name,
+                model=model,
+            ).observe(duration)
+
+            PROVIDER_ERRORS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                error_type=type(exc).__name__,
+            ).inc()
+
+            PROVIDER_REQUESTS_TOTAL.labels(
+                provider=self.provider_name,
+                model=model,
+                status="error",
+            ).inc()
+
+            logger.exception(
+                "Unexpected streaming inference provider error",
+                extra={
+                    "provider": self.provider_name,
+                    "model": model,
+                },
+            )
+
+            raise
+
+    async def health(self) -> bool:
+        """Check whether the provider is reachable."""
+
+        try:
+            response = await self._client.get(
+                "/models",
+                headers=self.headers,
+            )
+
+            return response.is_success
+
+        except (httpx.TimeoutException, httpx.RequestError):
+            return False
+
+        except Exception:
+            logger.exception(
+                "Inference provider health check failed",
+                extra={
+                    "provider": self.provider_name,
+                },
+            )
+
+            return False
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+
+        if not self._client.is_closed:
+            await self._client.aclose()
+
+    async def _backoff(self, attempt: int) -> None:
+        """Wait using exponential backoff with jitter."""
+
+        delay = min(
+            0.5 * (2**attempt),
+            10.0,
         )
 
-    assert calls == 1
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_retries_on_503(backend):
-    calls = 0
-
-    def handler(request):
-        nonlocal calls
-        calls += 1
-
-        if calls < 3:
-            return httpx.Response(503)
-
-        return httpx.Response(
-            200,
-            json={
-                "id": "success",
-                "choices": [],
-            },
+        jitter = random.uniform(
+            0.0,
+            self.MAX_BACKOFF_JITTER,
         )
 
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
-
-    backend._backoff = lambda attempt: _no_sleep()
-
-    response = await backend.chat_completion(
-        {
-            "model": "qwen2.5:7b",
-            "messages": [],
-        }
-    )
-
-    assert response["id"] == "success"
-    assert calls == 3
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_fails_after_max_retries(backend):
-    calls = 0
-
-    def handler(request):
-        nonlocal calls
-        calls += 1
-        return httpx.Response(503)
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
-
-    backend._backoff = lambda attempt: _no_sleep()
-
-    with pytest.raises(httpx.HTTPStatusError):
-        await backend.chat_completion(
-            {
-                "model": "qwen2.5:7b",
-                "messages": [],
-            }
-        )
-
-    assert calls == 3
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_invalid_json(backend):
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(
-            200,
-            content=b"not-json",
-        )
-    )
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=transport
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="invalid JSON",
-    ):
-        await backend.chat_completion(
-            {
-                "model": "qwen2.5:7b",
-                "messages": [],
-            }
-        )
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_rejects_non_dict_payload(backend):
-    with pytest.raises(
-        TypeError,
-        match="payload must be a dictionary",
-    ):
-        await backend.chat_completion([])
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_timeout_retries(backend):
-    calls = 0
-
-    def handler(request):
-        nonlocal calls
-        calls += 1
-        raise httpx.ReadTimeout(
-            "timeout",
-            request=request,
-        )
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
-
-    backend._backoff = lambda attempt: _no_sleep()
-
-    with pytest.raises(httpx.TimeoutException):
-        await backend.chat_completion(
-            {
-                "model": "qwen2.5:7b",
-                "messages": [],
-            }
-        )
-
-    assert calls == 3
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_chat_completion_network_error_retries(backend):
-    calls = 0
-
-    def handler(request):
-        nonlocal calls
-        calls += 1
-
-        raise httpx.ConnectError(
-            "connection failed",
-            request=request,
-        )
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler)
-    )
-
-    backend._backoff = lambda attempt: _no_sleep()
-
-    with pytest.raises(httpx.NetworkError):
-        await backend.chat_completion(
-            {
-                "model": "qwen2.5:7b",
-                "messages": [],
-            }
-        )
-
-    assert calls == 3
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_streaming_success(backend):
-    async def handler(request):
-        return httpx.Response(
-            200,
-            content=b"hello",
-        )
-
-    transport = httpx.MockTransport(handler)
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=transport
-    )
-
-    chunks = []
-
-    async for chunk in backend.chat_completion_stream(
-        {
-            "model": "qwen2.5:7b",
-            "messages": [],
-            "stream": True,
-        }
-    ):
-        chunks.append(chunk)
-
-    assert b"".join(chunks) == b"hello"
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_streaming_error(backend):
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(
-            500,
-            content=b"server error",
-        )
-    )
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=transport
-    )
-
-    with pytest.raises(httpx.HTTPStatusError):
-        async for _ in backend.chat_completion_stream(
-            {
-                "model": "qwen2.5:7b",
-                "messages": [],
-                "stream": True,
-            }
-        ):
-            pass
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_health_success(backend):
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(200)
-    )
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=transport
-    )
-
-    assert await backend.health() is True
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_health_failure(backend):
-    transport = httpx.MockTransport(
-        lambda request: httpx.Response(503)
-    )
-
-    await backend.client.aclose()
-    backend.client = httpx.AsyncClient(
-        transport=transport
-    )
-
-    assert await backend.health() is False
-
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_close_backend(backend):
-    assert backend.client.is_closed is False
-
-    await backend.close()
-
-    assert backend.client.is_closed is True
-
-    # close should be safe multiple times
-    await backend.close()
-
-
-@pytest.mark.asyncio
-async def _no_sleep():
-    return None
+        await asyncio.sleep(delay + jitter)

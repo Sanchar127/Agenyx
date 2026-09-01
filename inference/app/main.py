@@ -1,22 +1,47 @@
 import time
 from contextlib import asynccontextmanager
 from typing import Any
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
 from app.config import get_settings
 from app.failover.manager import FailoverManager
 from app.logger import logger
+from app.metrics import (
+    HTTP_ERRORS_TOTAL,
+    HTTP_REQUEST_DURATION_SECONDS,
+    HTTP_REQUESTS_IN_PROGRESS,
+    HTTP_REQUESTS_TOTAL,
+    INFERENCE_REQUESTS_IN_PROGRESS,
+    INFERENCE_REQUESTS_TOTAL,
+    INFERENCE_REQUEST_DURATION_SECONDS,
+)
 from app.models import ModelDefinition, ModelRegistry
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
 
 
+# =========================================================
+# SETTINGS
+# =========================================================
+
 settings = get_settings()
 
-provider_registry = ProviderRegistry()
 
+# =========================================================
+# REGISTRIES
+# =========================================================
+
+provider_registry = ProviderRegistry()
 model_registry = ModelRegistry()
+
+
+# =========================================================
+# RELIABILITY
+# =========================================================
 
 reliability = ReliabilityManager(
     degraded_failure_threshold=1,
@@ -41,8 +66,6 @@ provider_registry.register(
     )
 )
 
-
-# Register every provider with reliability tracking.
 for provider_name in provider_registry.list():
     reliability.register(provider_name)
 
@@ -100,22 +123,131 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    logger.info(
-        "Inference service shutting down"
-    )
+    logger.info("Inference service shutting down")
 
     await provider_registry.close()
 
-    logger.info(
-        "Inference providers closed"
-    )
+    logger.info("Inference providers closed")
 
+
+# =========================================================
+# APPLICATION
+# =========================================================
 
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+
+# =========================================================
+# HTTP OBSERVABILITY
+# =========================================================
+
+@app.middleware("http")
+async def prometheus_http_metrics(
+    request: Request,
+    call_next,
+):
+    """
+    Record HTTP-level Prometheus metrics.
+
+    The normalized FastAPI route is used instead of the raw URL
+    to prevent high-cardinality Prometheus labels.
+
+    Example:
+
+        /users/123
+        /users/456
+        /users/789
+
+    are all represented as:
+
+        /users/{user_id}
+    """
+
+    start = time.perf_counter()
+
+    method = request.method
+
+    route = request.scope.get("route")
+    route_name = getattr(route, "path", None)
+
+    if not route_name:
+        route_name = request.url.path
+
+    HTTP_REQUESTS_IN_PROGRESS.labels(
+        method=method,
+        route=route_name,
+    ).inc()
+
+    try:
+        response = await call_next(request)
+
+        status_code = str(response.status_code)
+
+        HTTP_REQUESTS_TOTAL.labels(
+            method=method,
+            route=route_name,
+            status_code=status_code,
+        ).inc()
+
+        if response.status_code >= 400:
+            HTTP_ERRORS_TOTAL.labels(
+                method=method,
+                route=route_name,
+                status_code=status_code,
+            ).inc()
+
+        return response
+
+    except Exception:
+        HTTP_REQUESTS_TOTAL.labels(
+            method=method,
+            route=route_name,
+            status_code="500",
+        ).inc()
+
+        HTTP_ERRORS_TOTAL.labels(
+            method=method,
+            route=route_name,
+            status_code="500",
+        ).inc()
+
+        raise
+
+    finally:
+        duration = time.perf_counter() - start
+
+        HTTP_REQUEST_DURATION_SECONDS.labels(
+            method=method,
+            route=route_name,
+        ).observe(duration)
+
+        HTTP_REQUESTS_IN_PROGRESS.labels(
+            method=method,
+            route=route_name,
+        ).dec()
+
+
+# =========================================================
+# METRICS
+# =========================================================
+
+@app.get(
+    "/metrics",
+    include_in_schema=False,
+)
+async def metrics() -> Response:
+    """
+    Prometheus metrics endpoint.
+    """
+
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 # =========================================================
@@ -130,14 +262,16 @@ async def health() -> dict[str, str]:
     This endpoint only confirms that the process is alive.
     """
 
-    logger.debug(
-        "Health check requested"
-    )
+    logger.debug("Health check requested")
 
     return {
         "status": "ok",
     }
 
+
+# =========================================================
+# READINESS
+# =========================================================
 
 @app.get("/ready")
 async def ready() -> dict[str, Any]:
@@ -149,9 +283,7 @@ async def ready() -> dict[str, Any]:
 
     for provider_name in settings.providers:
         try:
-            provider = provider_registry.get(
-                provider_name
-            )
+            provider = provider_registry.get(provider_name)
 
         except KeyError:
             logger.warning(
@@ -267,24 +399,6 @@ async def chat_completions(
 ) -> JSONResponse:
     """
     OpenAI-compatible chat completion endpoint.
-
-    Request flow:
-
-        client
-          ↓
-        parse request
-          ↓
-        validate messages
-          ↓
-        resolve model
-          ↓
-        resolve provider
-          ↓
-        reliability check
-          ↓
-        provider request
-          ↓
-        response
     """
 
     request_start = time.perf_counter()
@@ -327,7 +441,7 @@ async def chat_completions(
 
     if not isinstance(messages, list) or not messages:
         logger.warning(
-            "Inference request contains invalid messages",
+            "Inference request contains invalid messages"
         )
 
         raise HTTPException(
@@ -361,9 +475,7 @@ async def chat_completions(
         )
 
     try:
-        model = model_registry.get(
-            requested_model
-        )
+        model = model_registry.get(requested_model)
 
     except KeyError as exc:
         logger.warning(
@@ -436,9 +548,7 @@ async def chat_completions(
     # Reliability
     # -----------------------------------------------------
 
-    if not reliability.allow_request(
-        provider.name
-    ):
+    if not reliability.allow_request(provider.name):
         logger.warning(
             "Inference request rejected by reliability manager",
             extra={
@@ -446,6 +556,12 @@ async def chat_completions(
                 "provider": provider.name,
             },
         )
+
+        INFERENCE_REQUESTS_TOTAL.labels(
+            provider=provider.name,
+            model=model.model_id,
+            status="circuit_open",
+        ).inc()
 
         raise HTTPException(
             status_code=503,
@@ -459,15 +575,37 @@ async def chat_completions(
     # Execute inference
     # -----------------------------------------------------
 
+    INFERENCE_REQUESTS_IN_PROGRESS.labels(
+        provider=provider.name,
+        model=model.model_id,
+    ).inc()
+
+    provider_start = time.perf_counter()
+
     try:
         response = await provider.chat_completion(
             payload
         )
 
     except Exception as exc:
+        provider_duration = (
+            time.perf_counter() - provider_start
+        )
+
         reliability.record_failure(
             provider.name
         )
+
+        INFERENCE_REQUESTS_TOTAL.labels(
+            provider=provider.name,
+            model=model.model_id,
+            status="error",
+        ).inc()
+
+        INFERENCE_REQUEST_DURATION_SECONDS.labels(
+            provider=provider.name,
+            model=model.model_id,
+        ).observe(provider_duration)
 
         logger.error(
             "Inference request failed",
@@ -495,9 +633,31 @@ async def chat_completions(
             ),
         ) from exc
 
-    reliability.record_success(
-        provider.name
-    )
+    else:
+        provider_duration = (
+            time.perf_counter() - provider_start
+        )
+
+        reliability.record_success(
+            provider.name
+        )
+
+        INFERENCE_REQUESTS_TOTAL.labels(
+            provider=provider.name,
+            model=model.model_id,
+            status="success",
+        ).inc()
+
+        INFERENCE_REQUEST_DURATION_SECONDS.labels(
+            provider=provider.name,
+            model=model.model_id,
+        ).observe(provider_duration)
+
+    finally:
+        INFERENCE_REQUESTS_IN_PROGRESS.labels(
+            provider=provider.name,
+            model=model.model_id,
+        ).dec()
 
     # -----------------------------------------------------
     # Response
@@ -555,9 +715,7 @@ async def reliability_status() -> dict[str, Any]:
             {
                 "provider": state.provider_name,
                 "status": state.status.value,
-                "circuit_state": (
-                    state.circuit_state.value
-                ),
+                "circuit_state": state.circuit_state.value,
                 "consecutive_failures": (
                     state.consecutive_failures
                 ),
