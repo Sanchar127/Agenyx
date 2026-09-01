@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-inference
+  namespace: agenyx
+
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-inference
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+
+      ports:
+        - protocol: TCP
+          port: 8004
+
+  egress:
+    - {}

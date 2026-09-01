@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agenyx-inference
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-inference
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: agenyx-inference
+
+  ports:
+    - name: http
+      port: 8004
+      targetPort: http
+      protocol: TCP
