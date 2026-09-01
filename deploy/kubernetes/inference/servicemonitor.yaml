@@ -1,0 +1,23 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-inference
+  namespace: agenyx
+  labels:
+    app.kubernetes.io/name: agenyx-inference
+    app.kubernetes.io/part-of: agenyx
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-inference
+
+  namespaceSelector:
+    matchNames:
+      - agenyx
+
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s

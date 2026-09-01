@@ -24,6 +24,16 @@ spec:
         - protocol: TCP
           port: 6379
 
+    # Valkey Sentinel
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: agenyx
+
+      ports:
+        - protocol: TCP
+          port: 26379
+
     # Agent
     - to:
         - namespaceSelector:

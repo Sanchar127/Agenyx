@@ -9,6 +9,9 @@ resources:
   - service.yaml
   - deployment.yaml
   - networkpolicy.yaml
+  # - servicemonitor.yaml
 
-commonLabels:
-  app.kubernetes.io/part-of: agenyx
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: agenyx
+    includeSelectors: false
