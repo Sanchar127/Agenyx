@@ -1,0 +1,497 @@
+# ============================================================
+# Agenyx - kube-prometheus-stack
+# Production-oriented configuration for local Kubernetes
+#
+# Kubernetes:
+#   v1.30.14
+#
+# Storage:
+#   local-path
+#
+# Helm chart:
+#   kube-prometheus-stack
+# ============================================================
+
+
+# ============================================================
+# Prometheus Operator
+# ============================================================
+
+prometheusOperator:
+  enabled: true
+
+  # ----------------------------------------------------------
+  # Admission webhooks
+  # ----------------------------------------------------------
+
+  admissionWebhooks:
+    enabled: true
+
+  # ----------------------------------------------------------
+  # Resources
+  # ----------------------------------------------------------
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # ----------------------------------------------------------
+  # Pod-level security context
+  #
+  # IMPORTANT:
+  # allowPrivilegeEscalation and capabilities belong to the
+  # container security context, not the pod security context.
+  # ----------------------------------------------------------
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+
+  # ----------------------------------------------------------
+  # Container-level security context
+  # ----------------------------------------------------------
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+
+# ============================================================
+# Prometheus
+# ============================================================
+
+prometheus:
+  enabled: true
+
+  # ----------------------------------------------------------
+  # ServiceMonitor discovery
+  #
+  # false means Prometheus does not restrict ServiceMonitors
+  # to Helm-generated labels.
+  # ----------------------------------------------------------
+
+  serviceMonitorSelectorNilUsesHelmValues: false
+
+  podMonitorSelectorNilUsesHelmValues: false
+
+  ruleSelectorNilUsesHelmValues: false
+
+  prometheusSpec:
+
+    # ========================================================
+    # Namespace discovery
+    # ========================================================
+
+    serviceMonitorNamespaceSelector:
+      matchNames:
+        - agenyx
+
+    podMonitorNamespaceSelector:
+      matchNames:
+        - agenyx
+
+    ruleNamespaceSelector:
+      matchNames:
+        - agenyx
+
+    # ========================================================
+    # Resource selection
+    # ========================================================
+
+    serviceMonitorSelector: {}
+
+    podMonitorSelector: {}
+
+    ruleSelector: {}
+
+    # ========================================================
+    # Scraping
+    # ========================================================
+
+    scrapeInterval: 15s
+
+    scrapeTimeout: 10s
+
+    evaluationInterval: 15s
+
+    # ========================================================
+    # Data retention
+    # ========================================================
+
+    retention: 15d
+
+    retentionSize: "8GB"
+
+    # ========================================================
+    # Persistent storage
+    #
+    # Your Kubernetes cluster provides:
+    #
+    #   local-path
+    #   rancher.io/local-path
+    #
+    # Make it explicit so the deployment does not depend on
+    # whatever StorageClass happens to become the cluster
+    # default later.
+    # ========================================================
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+
+          accessModes:
+            - ReadWriteOnce
+
+          resources:
+            requests:
+              storage: 10Gi
+
+    # ========================================================
+    # Prometheus resources
+    # ========================================================
+
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+    # ========================================================
+    # Replicas
+    #
+    # One replica is appropriate for the current local
+    # single-node environment.
+    #
+    # For real HA production, this should be increased and
+    # backed by shared/reliable storage.
+    # ========================================================
+
+    replicas: 1
+
+    # ========================================================
+    # Pod security context
+    # ========================================================
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+
+      seccompProfile:
+        type: RuntimeDefault
+
+    # ========================================================
+    # Container security context
+    # ========================================================
+
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+
+      capabilities:
+        drop:
+          - ALL
+
+    # ========================================================
+    # Kubernetes API access
+    #
+    # Prometheus needs its ServiceAccount token for Kubernetes
+    # service discovery and monitoring targets.
+    # ========================================================
+
+    automountServiceAccountToken: true
+
+    # ========================================================
+    # External labels
+    #
+    # These become useful later when:
+    #
+    #   Prometheus -> Alertmanager
+    #   Prometheus -> remote storage
+    #   Grafana -> multiple clusters
+    #
+    # "environment: local" is intentional because this cluster
+    # is your local production simulation.
+    # ========================================================
+
+    externalLabels:
+      cluster: agenyx
+      environment: local
+
+    # ========================================================
+    # WAL compression
+    # ========================================================
+
+    walCompression: true
+
+    # ========================================================
+    # Safety limits
+    #
+    # Prevent accidentally unbounded scrape/query cardinality.
+    # ========================================================
+
+    enforcedSampleLimit: 100000
+
+    enforcedTargetLimit: 1000
+
+    enforcedLabelLimit: 30
+
+    enforcedLabelNameLengthLimit: 100
+
+    enforcedLabelValueLengthLimit: 200
+
+
+
+
+# ============================================================
+# Alertmanager
+# ============================================================
+
+alertmanager:
+  enabled: true
+
+  alertmanagerSpec:
+
+    # ----------------------------------------------------------
+    # Single replica for current local cluster
+    # ----------------------------------------------------------
+
+    replicas: 1
+
+    # ----------------------------------------------------------
+    # Alert retention
+    # ----------------------------------------------------------
+
+    retention: 120h
+
+    # ----------------------------------------------------------
+    # Resources
+    # ----------------------------------------------------------
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+    # ----------------------------------------------------------
+    # Pod security context
+    # ----------------------------------------------------------
+
+    securityContext:
+      runAsNonRoot: true
+      runAsUser: 65534
+      runAsGroup: 65534
+      fsGroup: 65534
+
+      seccompProfile:
+        type: RuntimeDefault
+
+    # ----------------------------------------------------------
+    # Container security context
+    # ----------------------------------------------------------
+
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+
+      capabilities:
+        drop:
+          - ALL
+
+
+# ============================================================
+# Grafana
+# ============================================================
+
+grafana:
+  enabled: true
+
+  # ----------------------------------------------------------
+  # Administrator credentials
+  #
+  # For production, use a Kubernetes Secret rather than
+  # keeping credentials directly in values.yaml.
+  #
+  # This can be configured later with:
+  #
+  #   admin.existingSecret
+  #
+  # once we create the dedicated Secret.
+  # ----------------------------------------------------------
+
+  admin:
+    existingSecret: ""
+
+  # ----------------------------------------------------------
+  # Resources
+  # ----------------------------------------------------------
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # ----------------------------------------------------------
+  # Pod security context
+  # ----------------------------------------------------------
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 472
+    runAsGroup: 472
+    fsGroup: 472
+
+    seccompProfile:
+      type: RuntimeDefault
+
+  # ----------------------------------------------------------
+  # Container security context
+  # ----------------------------------------------------------
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+
+    capabilities:
+      drop:
+        - ALL
+
+
+# ============================================================
+# Node Exporter
+# ============================================================
+
+nodeExporter:
+  enabled: true
+
+
+# ============================================================
+# kube-state-metrics
+# ============================================================
+
+kubeStateMetrics:
+  enabled: true
+
+
+# ============================================================
+# Default Kubernetes monitoring rules
+# ============================================================
+
+defaultRules:
+  create: true
+
+  rules:
+    # --------------------------------------------------------
+    # Alertmanager
+    # --------------------------------------------------------
+
+    alertmanager: true
+
+    # --------------------------------------------------------
+    # Kubernetes control plane
+    # --------------------------------------------------------
+
+    etcd: true
+
+    general: true
+
+    k8s: true
+
+    kubeApiserver: true
+
+    kubeApiserverAvailability: true
+
+    kubeApiserverSlos: true
+
+    kubelet: true
+
+    kubeProxy: true
+
+    kubeScheduler: true
+
+    # --------------------------------------------------------
+    # kube-prometheus
+    # --------------------------------------------------------
+
+    kubePrometheusGeneral: true
+
+    kubePrometheusNodeRecording: true
+
+    # --------------------------------------------------------
+    # Kubernetes resources
+    # --------------------------------------------------------
+
+    kubernetesApps: true
+
+    kubernetesResources: true
+
+    kubernetesStorage: true
+
+    kubernetesSystem: true
+
+    # --------------------------------------------------------
+    # kube-state-metrics
+    # --------------------------------------------------------
+
+    kubeStateMetrics: true
+
+    # --------------------------------------------------------
+    # Networking
+    # --------------------------------------------------------
+
+    network: true
+
+    # --------------------------------------------------------
+    # Node monitoring
+    # --------------------------------------------------------
+
+    node: true
+
+    nodeExporterAlerting: true
+
+    nodeExporterRecording: true
+
+    # --------------------------------------------------------
+    # Prometheus
+    # --------------------------------------------------------
+
+    prometheus: true
+
+    prometheusOperator: true
+
+
+# ============================================================
+# Kubernetes component monitoring
+#
+# These are disabled because local Kubernetes distributions
+# frequently do not expose the required control-plane metrics
+# endpoints in the same way as a full production cluster.
+# ============================================================
+
+kubeEtcd:
+  enabled: false
+
+kubeControllerManager:
+  enabled: false
+
+kubeScheduler:
+  enabled: false

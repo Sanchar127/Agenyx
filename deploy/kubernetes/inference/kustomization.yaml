@@ -9,7 +9,7 @@ resources:
   - service.yaml
   - deployment.yaml
   - networkpolicy.yaml
-  # - servicemonitor.yaml
+  - servicemonitor.yaml
 
 labels:
   - pairs:
