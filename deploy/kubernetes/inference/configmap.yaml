@@ -16,3 +16,20 @@ data:
 
   # Default model used by the inference backend.
   OLLAMA_MODEL: "llama3.2"
+
+  # -------------------------------------------------------
+  # OpenTelemetry
+  # -------------------------------------------------------
+
+  OTEL_SERVICE_NAME: "agenyx-inference"
+  OTEL_SERVICE_NAMESPACE: "agenyx"
+  OTEL_RESOURCE_ATTRIBUTES: "service.version=0.1.0"
+
+  # Send traces to the OpenTelemetry Collector.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://agenyx-otel-collector.monitoring.svc.cluster.local:4317"
+  OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
+
+  # Tracing only.
+  OTEL_TRACES_EXPORTER: "otlp"
+  OTEL_METRICS_EXPORTER: "none"
+  OTEL_LOGS_EXPORTER: "none"
