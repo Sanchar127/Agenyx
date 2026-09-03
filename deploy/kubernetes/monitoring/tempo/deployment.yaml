@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agenyx-tempo
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agenyx-tempo
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-tempo
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agenyx-tempo
+        app.kubernetes.io/part-of: agenyx
+
+    spec:
+      containers:
+        - name: tempo
+          image: grafana/tempo:2.8.2
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - "-config.file=/etc/tempo/tempo.yaml"
+
+          ports:
+            - name: tempo-http
+              containerPort: 3200
+              protocol: TCP
+
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+              readOnly: true
+
+            - name: data
+              mountPath: /var/tempo
+
+      volumes:
+        - name: config
+          configMap:
+            name: agenyx-tempo
+
+        - name: data
+          emptyDir: {}

@@ -25,6 +25,11 @@ data:
         timeout: 5s
 
     exporters:
+      otlp/tempo:
+        endpoint: agenyx-tempo.monitoring.svc.cluster.local:4317
+        tls:
+          insecure: true
+
       debug:
         verbosity: basic
 
@@ -37,4 +42,5 @@ data:
             - memory_limiter
             - batch
           exporters:
+            - otlp/tempo
             - debug

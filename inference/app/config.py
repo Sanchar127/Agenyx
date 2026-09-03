@@ -75,7 +75,17 @@ class Settings(BaseSettings):
             if name.strip()
         ]
 
+          # -----------------------------------------------------
+        # OpenTelemetry
+        # -----------------------------------------------------
 
+        otel_service_name: str = "agenyx-inference"
+
+        otel_service_namespace: str = "agenyx"
+
+        otel_exporter_otlp_endpoint: str = (
+            "http://agenyx-otel-collector.monitoring.svc.cluster.local:4317"
+        )
 @lru_cache
 def get_settings() -> Settings:
     """

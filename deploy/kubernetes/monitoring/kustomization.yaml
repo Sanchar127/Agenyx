@@ -4,3 +4,7 @@ kind: Kustomization
 resources:
   - namespace.yaml
   - prometheus
+  - alloy
+  - loki
+  - opentelemetry
+  - tempo

@@ -1,0 +1,46 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agenyx-tempo
+  namespace: monitoring
+
+data:
+  tempo.yaml: |
+    server:
+      http_listen_port: 3200
+
+    distributor:
+      receivers:
+        otlp:
+          protocols:
+            grpc:
+              endpoint: 0.0.0.0:4317
+            http:
+              endpoint: 0.0.0.0:4318
+
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+
+    querier:
+      frontend_worker:
+        frontend_address: 127.0.0.1:9095
+
+    query_frontend:
+      search:
+        duration_slo: 5s
+
+    metrics_generator:
+      registry:
+        external_labels:
+          source: tempo
+          cluster: agenyx
+
+    overrides:
+      defaults:
+        metrics_generator:
+          processors:
+            - service-graphs
+            - span-metrics

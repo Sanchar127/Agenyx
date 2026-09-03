@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agenyx-tempo
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agenyx-tempo
+    app.kubernetes.io/part-of: agenyx
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app.kubernetes.io/name: agenyx-tempo
+
+  ports:
+    - name: tempo-http
+      port: 3200
+      targetPort: tempo-http
+      protocol: TCP
+
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+      protocol: TCP
+
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+      protocol: TCP

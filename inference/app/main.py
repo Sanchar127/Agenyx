@@ -22,7 +22,7 @@ from app.models import ModelDefinition, ModelRegistry
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
-
+from app.telemetry import configure_telemetry, instrument_app
 
 # =========================================================
 # SETTINGS
@@ -129,6 +129,13 @@ async def lifespan(app: FastAPI):
 
     logger.info("Inference providers closed")
 
+
+
+# =========================================================
+# TELEMETRY
+# =========================================================
+
+configure_telemetry()
 
 # =========================================================
 # APPLICATION
