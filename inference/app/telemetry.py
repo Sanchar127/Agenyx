@@ -9,14 +9,12 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 
+OTEL_ENDPOINT = (
+    "http://agenyx-otel-collector.monitoring.svc.cluster.local:4317"
+)
+
+
 def configure_telemetry() -> None:
-    """
-    Configure OpenTelemetry tracing.
-
-    Configuration is read from the standard OTEL_* environment
-    variables provided by the OpenTelemetry SDK/exporter.
-    """
-
     resource = Resource.create(
         {
             "service.name": "agenyx-inference",
@@ -29,6 +27,7 @@ def configure_telemetry() -> None:
     )
 
     exporter = OTLPSpanExporter(
+        endpoint=OTEL_ENDPOINT,
         insecure=True,
     )
 
@@ -40,13 +39,5 @@ def configure_telemetry() -> None:
 
 
 def instrument_app(app) -> None:
-    """
-    Instrument FastAPI and HTTPX.
-
-    FastAPI creates incoming HTTP server spans.
-    HTTPX creates outgoing HTTP client spans.
-    """
-
     FastAPIInstrumentor.instrument_app(app)
-
     HTTPXClientInstrumentor().instrument()

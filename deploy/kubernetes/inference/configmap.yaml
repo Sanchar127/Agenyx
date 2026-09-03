@@ -10,12 +10,11 @@ data:
 
   # Ollama is running on the Kubernetes host.
   # host.kubernetes.internal is provided through hostAliases below.
-  OLLAMA_BASE_URL: "http://host.kubernetes.internal:11434/v1"
-
+  INFERENCE_BACKEND_BASE_URL: "http://host.kubernetes.internal:11434/v1"
   LOG_LEVEL: "INFO"
 
   # Default model used by the inference backend.
-  OLLAMA_MODEL: "llama3.2"
+  INFERENCE_DEFAULT_MODEL: "llama3.2:3b"
 
   # -------------------------------------------------------
   # OpenTelemetry

@@ -46,7 +46,7 @@ spec:
       # This gives the pod a stable hostname for reaching
       # Ollama running on the host machine.
       hostAliases:
-        - ip: "192.168.1.86"
+        - ip: "192.168.100.65"
           hostnames:
             - "host.kubernetes.internal"
 
