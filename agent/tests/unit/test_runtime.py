@@ -1,6 +1,6 @@
-
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -9,16 +9,17 @@ from app.agent_runtime.domain import (
     AgentDecision,
     DecisionType,
 )
+from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.runtime import AgentRuntime
 from app.core.errors import (
     AgentMaxStepsError,
     AgentProtocolError,
+    ExecutionLimitExceeded,
     ToolExecutionError,
 )
 from app.tools.builtin import create_tool_registry
 from app.tools.executor import ToolExecutor
-
 
 class FakeInference:
     """In-memory fake for the InferenceClient boundary."""
@@ -52,6 +53,30 @@ class FakeInference:
 
         return self.responses.pop(0)
 
+class HangingInference:
+    """
+    Inference fake that never completes unless Runtime
+    cancels the coroutine because the execution timeout expires.
+    """
+
+    def __init__(self) -> None:
+        self.started = False
+        self.cancelled = False
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.started = True
+
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
 
 class FakeRouter:
     """In-memory fake for semantic model routing."""
@@ -155,6 +180,29 @@ class FakePlanner:
 
         return self.decisions.pop(0)
 
+class HangingToolExecutor:
+    """
+    Tool executor fake that never completes unless Runtime
+    cancels the coroutine because the execution timeout expires.
+    """
+
+    def __init__(self) -> None:
+        self.started = False
+        self.cancelled = False
+
+    async def execute(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> Any:
+        self.started = True
+
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
 
 def create_runtime(
     responses: list[dict[str, Any]],
@@ -836,5 +884,74 @@ async def test_agent_decision_fail_does_not_execute_tools() -> None:
         await runtime.run(
             "Stop this execution",
         )
+
+    assert sandbox.calls == []
+
+@pytest.mark.asyncio
+async def test_agent_hard_cancels_hanging_inference() -> None:
+    runtime, _, router, sandbox = create_runtime(
+        [
+            final_response("unused"),
+        ]
+    )
+
+    inference = HangingInference()
+
+    runtime.inference = inference
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        timeout_seconds=0.05,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="inference exceeded execution timeout",
+    ):
+        await runtime.run(
+            "Hang forever",
+        )
+
+    assert inference.started is True
+    assert inference.cancelled is True
+
+    assert sandbox.calls == []
+
+    assert len(router.calls) == 1
+
+@pytest.mark.asyncio
+async def test_agent_hard_cancels_hanging_tool_execution() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+            ),
+        ]
+    )
+
+    hanging_executor = HangingToolExecutor()
+
+    runtime.tool_executor = hanging_executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        timeout_seconds=0.05,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="tool execution exceeded execution timeout",
+    ):
+        await runtime.run(
+            "Calculate 1 + 1",
+        )
+
+    assert hanging_executor.started is True
+    assert hanging_executor.cancelled is True
+
+    assert len(inference.calls) == 1
 
     assert sandbox.calls == []

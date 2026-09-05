@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
 
-from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.domain import (
     AgentDecision,
     Execution,
@@ -13,11 +13,13 @@ from app.agent_runtime.domain import (
     Step,
     StepType,
 )
+from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.prompts import SYSTEM_PROMPT
 from app.core.errors import (
     AgentMaxStepsError,
     AgentProtocolError,
+    ExecutionLimitExceeded,
     ToolExecutionError,
 )
 from app.core.logging import logger
@@ -55,18 +57,23 @@ class AgentRuntime:
     means the runtime permits at most N reasoning/inference
     iterations.
 
-    max_tool_calls = N
+        max_tool_calls = N
 
-    means the runtime permits at most N successful tool executions.
+    means the runtime permits at most N tool executions.
 
-    timeout_seconds = N
+        timeout_seconds = N
 
-    means the runtime permits the execution to continue for at
-    most N seconds of wall-clock execution time.
+    means the runtime permits the entire execution to continue
+    for at most N seconds of wall-clock execution time.
 
-    Timeout checks happen at execution boundaries. They do not
-    yet forcibly interrupt an inference or tool operation that is
-    already running.
+    The timeout is an execution-wide budget.
+
+    Hard timeout enforcement is performed around asynchronous
+    routing, inference, and tool-execution boundaries using
+    asyncio.wait_for().
+
+    This means a long-running asynchronous operation is cancelled
+    when the remaining execution budget is exhausted.
     """
 
     def __init__(
@@ -195,6 +202,35 @@ class AgentRuntime:
 
             raise
 
+    def _remaining_timeout(
+        self,
+        started_at: float,
+    ) -> float:
+        """
+        Return the remaining execution timeout.
+
+        The timeout is an execution-wide budget rather than a
+        per-operation timeout.
+
+        Raises:
+            ExecutionLimitExceeded:
+                If the execution budget has already expired.
+        """
+
+        elapsed = time.monotonic() - started_at
+
+        remaining = (
+            self.limits.timeout_seconds - elapsed
+        )
+
+        if remaining <= 0:
+            raise ExecutionLimitExceeded(
+                "Agent execution exceeded timeout: "
+                f"{self.limits.timeout_seconds} seconds"
+            )
+
+        return remaining
+
     async def _execute(
         self,
         *,
@@ -224,9 +260,8 @@ class AgentRuntime:
         # EXECUTION TIMER
         # =========================================================
         #
-        # Use monotonic time because it is appropriate for measuring
-        # elapsed duration and is not affected by system clock
-        # adjustments.
+        # monotonic() is used because it measures elapsed duration
+        # without being affected by system clock adjustments.
         # =========================================================
 
         execution_started_at = time.monotonic()
@@ -291,12 +326,30 @@ class AgentRuntime:
             execution_started_at
         )
 
-        route = await self.router.route(
-            session_id=session_id,
-            task=task,
-            messages=context.messages,
-            required_capabilities=required_capabilities,
-        )
+        try:
+            remaining_timeout = self._remaining_timeout(
+                execution_started_at
+            )
+
+            route = await asyncio.wait_for(
+                self.router.route(
+                    session_id=session_id,
+                    task=task,
+                    messages=context.messages,
+                    required_capabilities=required_capabilities,
+                ),
+                timeout=remaining_timeout,
+            )
+
+        except asyncio.TimeoutError as exc:
+            error = (
+                "Agent routing exceeded execution timeout: "
+                f"{self.limits.timeout_seconds} seconds"
+            )
+
+            raise ExecutionLimitExceeded(
+                error
+            ) from exc
 
         self.limits.validate_timeout(
             execution_started_at
@@ -368,12 +421,17 @@ class AgentRuntime:
             )
 
             try:
-                inference_response = (
-                    await self.inference.complete(
+                remaining_timeout = self._remaining_timeout(
+                    execution_started_at
+                )
+
+                inference_response = await asyncio.wait_for(
+                    self.inference.complete(
                         model=selected_model,
                         messages=context.messages,
                         tools=tool_definitions,
-                    )
+                    ),
+                    timeout=remaining_timeout,
                 )
 
                 inference_step.output = (
@@ -381,6 +439,20 @@ class AgentRuntime:
                 )
 
                 inference_step.mark_completed()
+
+            except asyncio.TimeoutError as exc:
+                error = (
+                    "Agent inference exceeded execution timeout: "
+                    f"{self.limits.timeout_seconds} seconds"
+                )
+
+                inference_step.mark_failed(
+                    error=error
+                )
+
+                raise ExecutionLimitExceeded(
+                    error
+                ) from exc
 
             except Exception as exc:
                 inference_step.mark_failed(
@@ -391,10 +463,6 @@ class AgentRuntime:
 
             # -----------------------------------------------------
             # TIMEOUT CHECK AFTER INFERENCE
-            # -----------------------------------------------------
-            #
-            # This catches an inference operation that returned
-            # after the configured execution budget.
             # -----------------------------------------------------
 
             self.limits.validate_timeout(
@@ -505,12 +573,6 @@ class AgentRuntime:
         # =========================================================
         # EXECUTION LIMIT
         # =========================================================
-        #
-        # The for-loop has consumed every allowed reasoning
-        # iteration.
-        #
-        # No additional inference call is permitted.
-        # =========================================================
 
         raise AgentMaxStepsError(
             "Agent exceeded maximum steps: "
@@ -559,17 +621,17 @@ class AgentRuntime:
                 f"{tool_name}"
             )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # TOOL CALL LIMIT
-        # ---------------------------------------------------------
+        # =========================================================
 
         self.limits.validate_tool_call(
             context.tool_call_count
         )
 
-        # ---------------------------------------------------------
+        # =========================================================
         # EXECUTION TIME LIMIT
-        # ---------------------------------------------------------
+        # =========================================================
 
         self.limits.validate_timeout(
             execution_started_at
@@ -629,7 +691,7 @@ class AgentRuntime:
         )
 
         # ---------------------------------------------------------
-        # FINAL TIMEOUT CHECK BEFORE SANDBOX
+        # TIMEOUT CHECK BEFORE TOOL EXECUTION
         # ---------------------------------------------------------
 
         self.limits.validate_timeout(
@@ -637,12 +699,31 @@ class AgentRuntime:
         )
 
         try:
-            tool_result = (
-                await self.tool_executor.execute(
+            remaining_timeout = self._remaining_timeout(
+                execution_started_at
+            )
+
+            tool_result = await asyncio.wait_for(
+                self.tool_executor.execute(
                     name=tool_name,
                     arguments=arguments,
-                )
+                ),
+                timeout=remaining_timeout,
             )
+
+        except asyncio.TimeoutError as exc:
+            error = (
+                "Agent tool execution exceeded execution timeout: "
+                f"{self.limits.timeout_seconds} seconds"
+            )
+
+            tool_result_step.mark_failed(
+                error=error
+            )
+
+            raise ExecutionLimitExceeded(
+                error
+            ) from exc
 
         except Exception as exc:
             tool_result_step.mark_failed(

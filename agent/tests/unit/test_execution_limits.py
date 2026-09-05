@@ -8,7 +8,7 @@ from app.core.errors import (
     ExecutionLimitExceeded,
 )
 
-
+import time
 def test_execution_limits_accept_valid_values() -> None:
     limits = ExecutionLimits(
         max_steps=5,
@@ -108,3 +108,38 @@ def test_tool_limit_rejects_call_at_limit() -> None:
         match="maximum tool calls",
     ):
         limits.validate_tool_call(3)
+
+
+
+def test_timeout_allows_execution_before_limit() -> None:
+    limits = ExecutionLimits(timeout_seconds=10.0)
+    started_at = time.monotonic()
+
+    limits.validate_timeout(started_at)
+
+
+def test_timeout_rejects_expired_execution() -> None:
+    limits = ExecutionLimits(timeout_seconds=1.0)
+    started_at = time.monotonic() - 2.0
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="timeout",
+    ):
+        limits.validate_timeout(started_at)
+
+
+def test_timeout_must_be_positive() -> None:
+    with pytest.raises(
+        ValueError,
+        match="timeout_seconds",
+    ):
+        ExecutionLimits(timeout_seconds=0)
+
+
+def test_timeout_rejects_negative_value() -> None:
+    with pytest.raises(
+        ValueError,
+        match="timeout_seconds",
+    ):
+        ExecutionLimits(timeout_seconds=-1)
