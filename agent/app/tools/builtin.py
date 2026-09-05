@@ -9,7 +9,7 @@ def create_tool_registry() -> ToolRegistry:
         Tool(
             name="calculator",
             description="Calculate a mathematical expression.",
-            parameters={
+            input_schema={
                 "type": "object",
                 "properties": {
                     "expression": {

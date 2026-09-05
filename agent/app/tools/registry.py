@@ -12,8 +12,8 @@ from app.core.errors import (
 class Tool:
     name: str
     description: str
-    parameters: dict[str, Any]
-    execute: Callable[..., str]
+    input_schema: dict[str, Any]
+    execute: Callable[..., Any]
 
 
 class ToolRegistry:
@@ -30,7 +30,7 @@ class ToolRegistry:
         self._tools[tool.name] = tool
 
     def has(self, name: str) -> bool:
-      return name in self._tools
+        return name in self._tools
 
     def definitions(self) -> list[dict[str, Any]]:
         return [
@@ -39,7 +39,7 @@ class ToolRegistry:
                 "function": {
                     "name": tool.name,
                     "description": tool.description,
-                    "parameters": tool.parameters,
+                    "parameters": tool.input_schema,
                 },
             }
             for tool in self._tools.values()
@@ -49,7 +49,7 @@ class ToolRegistry:
         self,
         name: str,
         arguments: dict[str, Any],
-    ) -> str:
+    ) -> Any:
 
         tool = self._tools.get(name)
 
