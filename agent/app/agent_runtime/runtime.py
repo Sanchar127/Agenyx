@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any
 
@@ -61,6 +62,11 @@ class AgentRuntime:
 
     means the runtime permits at most N tool executions.
 
+        max_repeated_tool_calls = N
+
+    means the runtime permits at most N executions of the same
+    tool with the same arguments during one execution.
+
         timeout_seconds = N
 
     means the runtime permits the entire execution to continue
@@ -95,6 +101,7 @@ class AgentRuntime:
         self.limits = ExecutionLimits(
             max_steps=max_steps,
             max_tool_calls=20,
+            max_repeated_tool_calls=3,
             timeout_seconds=60.0,
         )
 
@@ -253,18 +260,40 @@ class AgentRuntime:
                 exhausted without producing a final answer.
 
             ExecutionLimitExceeded:
-                When the execution timeout is exceeded.
+                When the execution timeout or another execution
+                limit is exceeded.
         """
 
         # =========================================================
         # EXECUTION TIMER
         # =========================================================
-        #
-        # monotonic() is used because it measures elapsed duration
-        # without being affected by system clock adjustments.
-        # =========================================================
 
         execution_started_at = time.monotonic()
+
+        # =========================================================
+        # REPEATED TOOL CALL TRACKING
+        # =========================================================
+        #
+        # The key is:
+        #
+        #     (tool_name, serialized_arguments)
+        #
+        # This state belongs to one execution only.
+        #
+        # Example:
+        #
+        #     calculator({"expression": "2 + 2"}) -> 1
+        #     calculator({"expression": "2 + 2"}) -> 2
+        #     calculator({"expression": "2 + 2"}) -> 3
+        #
+        # The next identical call will be rejected when the
+        # configured max_repeated_tool_calls limit is 3.
+        # =========================================================
+
+        repeated_tool_calls: dict[
+            tuple[str, str],
+            int,
+        ] = {}
 
         # =========================================================
         # PLAN
@@ -557,6 +586,7 @@ class AgentRuntime:
                     inference_response=inference_response,
                     decision=decision,
                     execution_started_at=execution_started_at,
+                    repeated_tool_calls=repeated_tool_calls,
                 )
 
                 continue
@@ -587,12 +617,16 @@ class AgentRuntime:
         inference_response: Any,
         decision: AgentDecision,
         execution_started_at: float,
+        repeated_tool_calls: dict[
+            tuple[str, str],
+            int,
+        ],
     ) -> None:
         """
         Execute one tool call and append its observation to context.
 
-        The execution-level tool-call and timeout limits are checked
-        before the actual ToolExecutor invocation.
+        The execution-level tool-call, repeated-call, and timeout
+        limits are checked before the actual ToolExecutor invocation.
         """
 
         tool_name = decision.tool_name
@@ -627,6 +661,37 @@ class AgentRuntime:
 
         self.limits.validate_tool_call(
             context.tool_call_count
+        )
+
+        # =========================================================
+        # REPEATED TOOL CALL LIMIT
+        # =========================================================
+        #
+        # JSON serialization with sorted keys ensures that
+        # equivalent dictionaries produce the same key even when
+        # their insertion order differs.
+        # =========================================================
+
+        tool_call_key = (
+            tool_name,
+            json.dumps(
+                arguments,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+        repeated_count = repeated_tool_calls.get(
+            tool_call_key,
+            0,
+        )
+
+        self.limits.validate_repeated_tool_call(
+            repeated_count
+        )
+
+        repeated_tool_calls[tool_call_key] = (
+            repeated_count + 1
         )
 
         # =========================================================

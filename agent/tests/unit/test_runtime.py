@@ -955,3 +955,52 @@ async def test_agent_hard_cancels_hanging_tool_execution() -> None:
     assert len(inference.calls) == 1
 
     assert sandbox.calls == []
+
+@pytest.mark.asyncio
+async def test_agent_rejects_repeated_identical_tool_calls() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-1",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-2",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-3",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-4",
+            ),
+        ]
+    )
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=3,
+        timeout_seconds=60.0,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum repeated tool calls",
+    ):
+        await runtime.run(
+            "Keep calculating 1 + 1",
+        )
+
+    # The first three identical tool calls are executed.
+    assert len(sandbox.calls) == 3
+
+    # The fourth inference response requests the fourth identical
+    # tool call, which is then rejected by the repeated-call limit.
+    assert len(inference.calls) == 4

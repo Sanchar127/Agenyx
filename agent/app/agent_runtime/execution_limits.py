@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,11 +19,13 @@ class ExecutionLimits:
 
     - maximum inference/execution steps
     - maximum tool calls
+    - maximum repeated identical tool calls
     - maximum total execution time
     """
 
     max_steps: int = 10
     max_tool_calls: int = 20
+    max_repeated_tool_calls: int = 3
     timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
@@ -34,6 +37,11 @@ class ExecutionLimits:
         if self.max_tool_calls < 0:
             raise ValueError(
                 "max_tool_calls cannot be negative"
+            )
+
+        if self.max_repeated_tool_calls <= 0:
+            raise ValueError(
+                "max_repeated_tool_calls must be greater than zero"
             )
 
         if self.timeout_seconds <= 0:
@@ -64,6 +72,24 @@ class ExecutionLimits:
             raise ExecutionLimitExceeded(
                 "Agent exceeded maximum tool calls: "
                 f"{self.max_tool_calls}"
+            )
+
+    def validate_repeated_tool_call(
+        self,
+        repeated_calls: int,
+    ) -> None:
+        """
+        Validate that an identical tool call has not been repeated
+        beyond the configured limit.
+
+        `repeated_calls` is the number of times the same tool call
+        with the same arguments has already been executed.
+        """
+
+        if repeated_calls >= self.max_repeated_tool_calls:
+            raise ExecutionLimitExceeded(
+                "Agent exceeded maximum repeated tool calls: "
+                f"{self.max_repeated_tool_calls}"
             )
 
     def validate_timeout(self, started_at: float) -> None:

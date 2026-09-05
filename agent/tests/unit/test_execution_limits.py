@@ -143,3 +143,34 @@ def test_timeout_rejects_negative_value() -> None:
         match="timeout_seconds",
     ):
         ExecutionLimits(timeout_seconds=-1)
+
+def test_repeated_tool_calls_are_allowed_up_to_limit() -> None:
+    limits = ExecutionLimits(
+        max_repeated_tool_calls=3,
+    )
+
+    limits.validate_repeated_tool_call(0)
+    limits.validate_repeated_tool_call(1)
+    limits.validate_repeated_tool_call(2)
+
+
+def test_repeated_tool_calls_are_rejected_at_limit() -> None:
+    limits = ExecutionLimits(
+        max_repeated_tool_calls=3,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum repeated tool calls",
+    ):
+        limits.validate_repeated_tool_call(3)
+
+
+def test_repeated_tool_call_limit_must_be_positive() -> None:
+    with pytest.raises(
+        ValueError,
+        match="max_repeated_tool_calls",
+    ):
+        ExecutionLimits(
+            max_repeated_tool_calls=0,
+        )
