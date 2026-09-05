@@ -29,8 +29,7 @@ class UnknownToolError(ToolError):
 class InvalidToolArgumentsError(ToolError):
     pass
 
-
-class ToolExecutionError(ToolError):
+class ToolExecutionError(RuntimeError):
     pass
 
 

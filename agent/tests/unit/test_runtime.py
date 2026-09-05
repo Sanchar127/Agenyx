@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Any
@@ -15,9 +16,8 @@ from app.core.errors import (
     AgentProtocolError,
     ToolExecutionError,
 )
-from app.router.client import SemanticRouterClient
-from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
+from app.tools.executor import ToolExecutor
 
 
 class FakeInference:
@@ -83,11 +83,20 @@ class FakeRouter:
         return self.Decision()
 
 
-class FakeToolSandbox(ToolSandboxClient):
-    """In-memory sandbox used by runtime unit tests."""
+class FakeToolSandbox:
+    """
+    In-memory fake for the ToolSandboxClient boundary.
 
-    def __init__(self) -> None:
-        self.tools = create_tool_registry()
+    The fake simulates the sandbox while keeping runtime tests
+    independent from HTTP and the real sandbox service.
+    """
+
+    def __init__(
+        self,
+        *,
+        tools: Any,
+    ) -> None:
+        self.tools = tools
         self.calls: list[
             tuple[str, dict[str, Any]]
         ] = []
@@ -160,16 +169,27 @@ def create_runtime(
     """
     Create a fully wired AgentRuntime for unit tests.
 
-    Planner and Runtime intentionally receive the same
-    ToolRegistry instance so they operate against the same
-    registered tool definitions.
+    Planner, ToolExecutor, and Runtime intentionally receive
+    the same ToolRegistry instance so they operate against the
+    same registered tool definitions.
+
+    The Runtime talks only to ToolExecutor. The ToolExecutor
+    delegates actual execution to the fake sandbox.
     """
 
     inference = FakeInference(responses)
     router = FakeRouter()
-    sandbox = FakeToolSandbox()
 
     tools = create_tool_registry()
+
+    sandbox = FakeToolSandbox(
+        tools=tools,
+    )
+
+    tool_executor = ToolExecutor(
+        registry=tools,
+        sandbox=sandbox,
+    )
 
     planner = Planner(
         tools=tools,
@@ -179,8 +199,8 @@ def create_runtime(
         router=router,
         inference=inference,
         tools=tools,
+        tool_executor=tool_executor,
         max_steps=max_steps,
-        sandbox=sandbox,
         planner=planner,
     )
 
@@ -261,7 +281,7 @@ async def test_agent_returns_final_answer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_executes_tool_through_sandbox() -> None:
+async def test_agent_executes_tool_through_tool_executor() -> None:
     runtime, inference, _, sandbox = create_runtime(
         [
             tool_call_response(
