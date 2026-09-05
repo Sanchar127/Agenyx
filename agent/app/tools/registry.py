@@ -29,6 +29,9 @@ class ToolRegistry:
 
         self._tools[tool.name] = tool
 
+    def has(self, name: str) -> bool:
+      return name in self._tools
+
     def definitions(self) -> list[dict[str, Any]]:
         return [
             {

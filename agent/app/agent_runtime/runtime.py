@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from app.agent_runtime.domain import (
@@ -9,11 +8,9 @@ from app.agent_runtime.domain import (
     ExecutionResult,
     ExecutionStatus,
 )
+from app.agent_runtime.planner import Planner
 from app.agent_runtime.prompts import SYSTEM_PROMPT
-from app.core.errors import (
-    AgentMaxStepsError,
-    AgentProtocolError,
-)
+from app.core.errors import AgentMaxStepsError
 from app.core.logging import logger
 from app.inference.client import InferenceClient
 from app.models.responses import AgentResponse, ToolCallResult
@@ -32,14 +29,17 @@ class AgentRuntime:
     - maintain the reasoning loop
     - ask semantic router for model selection
     - call inference service
-    - process model tool calls
-    - send tool execution to sandbox
+    - ask Planner to interpret inference responses
+    - execute approved tool decisions through the sandbox
     - maintain conversation messages
     - produce an execution result
 
     Not responsible for:
     - model inference
     - model/provider implementation
+    - interpreting raw inference responses
+    - parsing tool calls
+    - validating tool calls
     - tool implementation
     - tool isolation
     - HTTP gateway concerns
@@ -54,6 +54,7 @@ class AgentRuntime:
         inference: InferenceClient,
         tools: ToolRegistry,
         sandbox: ToolSandboxClient,
+        planner: Planner,
         max_steps: int,
     ) -> None:
         if max_steps <= 0:
@@ -63,6 +64,7 @@ class AgentRuntime:
         self.inference = inference
         self.tools = tools
         self.sandbox = sandbox
+        self.planner = planner
         self.max_steps = max_steps
 
     async def run(
@@ -73,7 +75,6 @@ class AgentRuntime:
         task: str = "",
         required_capabilities: list[str] | None = None,
     ) -> AgentResponse:
-
         execution = Execution()
 
         context = ExecutionContext(
@@ -165,27 +166,26 @@ class AgentRuntime:
         task: str,
         required_capabilities: list[str] | None,
     ) -> ExecutionResult:
-
-        messages: list[dict[str, Any]] = [
+        context.add_message(
             {
                 "role": "system",
                 "content": SYSTEM_PROMPT,
-            },
+            }
+        )
+
+        context.add_message(
             {
                 "role": "user",
                 "content": intent,
-            },
-        ]
-
-        for message in messages:
-            context.add_message(message)
+            }
+        )
 
         tool_definitions = self.tools.definitions()
 
         decision = await self.router.route(
             session_id=session_id,
             task=task,
-            messages=messages,
+            messages=context.messages,
             required_capabilities=required_capabilities,
         )
 
@@ -200,8 +200,12 @@ class AgentRuntime:
 
         execution = context.execution
 
-        execution.metadata["model"] = decision.model
-        execution.metadata["provider"] = decision.provider
+        execution.metadata.update(
+            {
+                "model": decision.model,
+                "provider": decision.provider,
+            }
+        )
 
         logger.info(
             "agent_model_selected "
@@ -214,7 +218,6 @@ class AgentRuntime:
         executed_tools: list[ToolCallResult] = []
 
         for step in range(1, self.max_steps + 1):
-
             context.current_step = step
 
             logger.info(
@@ -227,64 +230,40 @@ class AgentRuntime:
 
             response = await self.inference.complete(
                 model=selected_model,
-                messages=messages,
+                messages=context.messages,
                 tools=tool_definitions,
             )
 
-            choice = self._extract_choice(response)
+            decision = self.planner.plan(
+                response=response,
+                context=context,
+            )
 
-            message = choice.get("message")
-
-            if not isinstance(message, dict):
-                raise AgentProtocolError(
-                    "Inference response is missing message"
+            if decision.is_final:
+                return self._complete_execution(
+                    context=context,
+                    output=decision.content,
+                    step=step,
+                    executed_tools=executed_tools,
                 )
 
-            context.add_message(message)
+            if decision.is_tool_call:
+                assert decision.tool_name is not None
+                assert decision.call_id is not None
 
-            tool_calls = message.get("tool_calls", [])
+                tool_name = decision.tool_name
+                arguments = decision.arguments
+                call_id = decision.call_id
 
-            if not isinstance(tool_calls, list):
-                raise AgentProtocolError(
-                    "Inference tool_calls must be a list"
+                assistant_message = self._extract_assistant_message(
+                    response
                 )
 
-            if not tool_calls:
-
-                content = message.get("content")
-
-                if not isinstance(content, str):
-                    raise AgentProtocolError(
-                        "Inference returned neither "
-                        "tool calls nor content"
-                    )
-
-                execution.metadata["steps"] = step
-                execution.metadata["tool_calls"] = list(
-                    executed_tools
-                )
-
-                context.metadata["steps"] = step
-                context.metadata["tool_calls"] = list(
-                    executed_tools
-                )
-
-                return ExecutionResult.from_execution(
-                    execution,
-                    output=content,
-                )
-
-            messages.append(message)
-
-            for tool_call in tool_calls:
-
-                name, arguments, call_id = (
-                    self._parse_tool_call(tool_call)
-                )
+                context.add_message(assistant_message)
 
                 context.add_tool_call(
                     {
-                        "name": name,
+                        "name": tool_name,
                         "arguments": arguments,
                         "call_id": call_id,
                         "step": step,
@@ -296,40 +275,31 @@ class AgentRuntime:
                     "execution_id=%s step=%s tool=%s",
                     execution.id,
                     step,
-                    name,
+                    tool_name,
                 )
 
                 result = await self.sandbox.execute(
-                    name,
+                    tool_name,
                     arguments,
                 )
 
                 executed_tools.append(
                     ToolCallResult(
-                        name=name,
+                        name=tool_name,
                         arguments=arguments,
                         result=result,
                     )
                 )
 
                 context.add_observation(
-                    f"Tool '{name}' returned: {result}"
-                )
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "name": name,
-                        "content": result,
-                    }
+                    f"Tool '{tool_name}' returned: {result}"
                 )
 
                 context.add_message(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "name": name,
+                        "name": tool_name,
                         "content": result,
                     }
                 )
@@ -339,11 +309,84 @@ class AgentRuntime:
                     "execution_id=%s step=%s tool=%s",
                     execution.id,
                     step,
-                    name,
+                    tool_name,
                 )
+
+                continue
+
+            raise RuntimeError(
+                f"Unsupported agent decision type: {decision.type}"
+            )
 
         raise AgentMaxStepsError(
             f"Agent exceeded maximum steps: {self.max_steps}"
+        )
+
+    @staticmethod
+    def _extract_assistant_message(
+        response: dict[str, Any],
+    ) -> dict[str, Any]:
+        """
+        Extract the assistant message after Planner has already
+        validated the inference response.
+
+        This is intentionally a small transport extraction helper.
+        All protocol validation belongs to Planner.
+        """
+
+        choices = response.get("choices")
+
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(
+                "Planner accepted an inference response without choices"
+            )
+
+        choice = choices[0]
+
+        if not isinstance(choice, dict):
+            raise RuntimeError(
+                "Planner accepted an invalid inference choice"
+            )
+
+        message = choice.get("message")
+
+        if not isinstance(message, dict):
+            raise RuntimeError(
+                "Planner accepted an inference response without message"
+            )
+
+        return message
+
+    @staticmethod
+    def _complete_execution(
+        *,
+        context: ExecutionContext,
+        output: str | None,
+        step: int,
+        executed_tools: list[ToolCallResult],
+    ) -> ExecutionResult:
+        if not isinstance(output, str):
+            raise RuntimeError(
+                "Planner produced a final decision without string content"
+            )
+
+        context.metadata.update(
+            {
+                "steps": step,
+                "tool_calls": list(executed_tools),
+            }
+        )
+
+        context.execution.metadata.update(
+            {
+                "steps": step,
+                "tool_calls": list(executed_tools),
+            }
+        )
+
+        return ExecutionResult.from_execution(
+            context.execution,
+            output=output,
         )
 
     @staticmethod
@@ -353,7 +396,6 @@ class AgentRuntime:
         steps: int,
         tool_calls: list[ToolCallResult],
     ) -> AgentResponse:
-
         if result.status is not ExecutionStatus.COMPLETED:
             raise RuntimeError(
                 "Cannot create successful AgentResponse from "
@@ -372,79 +414,3 @@ class AgentRuntime:
             steps=steps,
             tool_calls=tool_calls,
         )
-
-    @staticmethod
-    def _parse_tool_call(
-        tool_call: Any,
-    ) -> tuple[str, dict[str, Any], str]:
-
-        if not isinstance(tool_call, dict):
-            raise AgentProtocolError(
-                "Tool call must be an object"
-            )
-
-        call_id = tool_call.get("id")
-
-        if not isinstance(call_id, str) or not call_id:
-            raise AgentProtocolError(
-                "Tool call has no valid ID"
-            )
-
-        function = tool_call.get("function")
-
-        if not isinstance(function, dict):
-            raise AgentProtocolError(
-                "Tool call has invalid function"
-            )
-
-        name = function.get("name")
-
-        if not isinstance(name, str) or not name:
-            raise AgentProtocolError(
-                "Tool call has no valid name"
-            )
-
-        raw_arguments = function.get(
-            "arguments",
-            "{}",
-        )
-
-        if not isinstance(raw_arguments, str):
-            raise AgentProtocolError(
-                f"Invalid arguments for tool '{name}'"
-            )
-
-        try:
-            arguments = json.loads(raw_arguments)
-        except json.JSONDecodeError as exc:
-            raise AgentProtocolError(
-                f"Invalid arguments for tool '{name}'"
-            ) from exc
-
-        if not isinstance(arguments, dict):
-            raise AgentProtocolError(
-                "Tool arguments must be an object"
-            )
-
-        return name, arguments, call_id
-
-    @staticmethod
-    def _extract_choice(
-        response: dict[str, Any],
-    ) -> dict[str, Any]:
-
-        choices = response.get("choices")
-
-        if not isinstance(choices, list) or not choices:
-            raise AgentProtocolError(
-                "Inference response does not contain choices"
-            )
-
-        choice = choices[0]
-
-        if not isinstance(choice, dict):
-            raise AgentProtocolError(
-                "Inference response contains invalid choice"
-            )
-
-        return choice

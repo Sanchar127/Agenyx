@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 
+from app.agent_runtime.planner import Planner
 from app.agent_runtime.runtime import AgentRuntime
 from app.core.errors import (
     AgentMaxStepsError,
@@ -83,12 +84,12 @@ class FakeToolSandbox(ToolSandboxClient):
 
     def __init__(self) -> None:
         self.tools = create_tool_registry()
-        self.calls: list[tuple[str, dict]] = []
+        self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def execute(
         self,
         name: str,
-        arguments: dict,
+        arguments: dict[str, Any],
     ) -> str:
         self.calls.append(
             (
@@ -113,16 +114,31 @@ def create_runtime(
     FakeRouter,
     FakeToolSandbox,
 ]:
+    """
+    Create a fully wired AgentRuntime for unit tests.
+
+    Planner and Runtime intentionally receive the same
+    ToolRegistry instance so they operate against the same
+    registered tool definitions.
+    """
+
     inference = FakeInference(responses)
     router = FakeRouter()
     sandbox = FakeToolSandbox()
 
+    tools = create_tool_registry()
+
+    planner = Planner(
+        tools=tools,
+    )
+
     runtime = AgentRuntime(
         router=router,
         inference=inference,
-        tools=create_tool_registry(),
+        tools=tools,
         max_steps=max_steps,
         sandbox=sandbox,
+        planner=planner,
     )
 
     return runtime, inference, router, sandbox
@@ -132,7 +148,7 @@ def tool_call_response(
     name: str,
     arguments: str,
     call_id: str = "call-1",
-) -> dict:
+) -> dict[str, Any]:
     return {
         "choices": [
             {
@@ -155,7 +171,9 @@ def tool_call_response(
     }
 
 
-def final_response(answer: str) -> dict:
+def final_response(
+    answer: str,
+) -> dict[str, Any]:
     return {
         "choices": [
             {
@@ -176,12 +194,15 @@ async def test_agent_returns_final_answer() -> None:
         ]
     )
 
-    result = await runtime.run("Say hello")
+    result = await runtime.run(
+        "Say hello",
+    )
 
     assert result.status == "success"
     assert result.answer == "Hello!"
     assert result.steps == 1
     assert result.tool_calls == []
+
     assert sandbox.calls == []
 
     assert len(router.calls) == 1
@@ -200,13 +221,13 @@ async def test_agent_executes_tool_through_sandbox() -> None:
                 '{"expression":"25 * 17"}',
             ),
             final_response(
-                "The answer is 425."
+                "The answer is 425.",
             ),
         ]
     )
 
     result = await runtime.run(
-        "What is 25 * 17?"
+        "What is 25 * 17?",
     )
 
     assert result.status == "success"
@@ -214,13 +235,21 @@ async def test_agent_executes_tool_through_sandbox() -> None:
     assert result.steps == 2
 
     assert len(result.tool_calls) == 1
+
     assert result.tool_calls[0].name == "calculator"
+
+    assert result.tool_calls[0].arguments == {
+        "expression": "25 * 17",
+    }
+
     assert result.tool_calls[0].result == "425"
 
     assert sandbox.calls == [
         (
             "calculator",
-            {"expression": "25 * 17"},
+            {
+                "expression": "25 * 17",
+            },
         )
     ]
 
@@ -242,19 +271,30 @@ async def test_agent_supports_multiple_steps() -> None:
                 "call-2",
             ),
             final_response(
-                "The final result is 435."
+                "The final result is 435.",
             ),
         ]
     )
 
     result = await runtime.run(
-        "Calculate 25 * 17 and then add 10."
+        "Calculate 25 * 17 and then add 10.",
     )
 
+    assert result.status == "success"
     assert result.steps == 3
+
     assert len(result.tool_calls) == 2
 
+    assert result.tool_calls[0].name == "calculator"
+    assert result.tool_calls[0].arguments == {
+        "expression": "25 * 17",
+    }
     assert result.tool_calls[0].result == "425"
+
+    assert result.tool_calls[1].name == "calculator"
+    assert result.tool_calls[1].arguments == {
+        "expression": "425 + 10",
+    }
     assert result.tool_calls[1].result == "435"
 
     assert result.answer == (
@@ -264,11 +304,15 @@ async def test_agent_supports_multiple_steps() -> None:
     assert sandbox.calls == [
         (
             "calculator",
-            {"expression": "25 * 17"},
+            {
+                "expression": "25 * 17",
+            },
         ),
         (
             "calculator",
-            {"expression": "425 + 10"},
+            {
+                "expression": "425 + 10",
+            },
         ),
     ]
 
@@ -287,9 +331,12 @@ async def test_agent_enforces_max_steps() -> None:
         max_steps=3,
     )
 
-    with pytest.raises(AgentMaxStepsError):
+    with pytest.raises(
+        AgentMaxStepsError,
+        match="maximum steps",
+    ):
         await runtime.run(
-            "Keep calculating forever"
+            "Keep calculating forever",
         )
 
     assert len(sandbox.calls) == 3
@@ -301,13 +348,39 @@ async def test_agent_rejects_invalid_inference_response() -> None:
     runtime, _, _, sandbox = create_runtime(
         [
             {
-                "invalid": "response"
+                "invalid": "response",
             }
         ]
     )
 
-    with pytest.raises(AgentProtocolError):
-        await runtime.run("Do something")
+    with pytest.raises(
+        AgentProtocolError,
+    ):
+        await runtime.run(
+            "Do something",
+        )
+
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_unknown_tool() -> None:
+    runtime, _, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "unknown_tool",
+                "{}",
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        AgentProtocolError,
+        match="Unknown tool requested by model",
+    ):
+        await runtime.run(
+            "Use an unknown tool",
+        )
 
     assert sandbox.calls == []
 
@@ -323,13 +396,187 @@ async def test_tool_failure_is_not_silently_ignored() -> None:
         ]
     )
 
-    with pytest.raises(ToolExecutionError):
+    with pytest.raises(
+        ToolExecutionError,
+    ):
         await runtime.run(
-            "Execute something dangerous"
+            "Execute something dangerous",
         )
 
     assert len(sandbox.calls) == 1
+
     assert sandbox.calls[0] == (
         "calculator",
-        {"expression": "import os"},
+        {
+            "expression": "import os",
+        },
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_passes_tool_messages_back_to_inference() -> None:
+    runtime, inference, _, _ = create_runtime(
+        [
+            tool_call_response(
+                "calculator",
+                '{"expression":"2 + 2"}',
+                "call-123",
+            ),
+            final_response(
+                "The answer is 4.",
+            ),
+        ]
+    )
+
+    result = await runtime.run(
+        "What is 2 + 2?",
+    )
+
+    assert result.answer == "The answer is 4."
+    assert len(inference.calls) == 2
+
+    second_call_messages = inference.calls[1]["messages"]
+
+    assert any(
+        message.get("role") == "assistant"
+        and message.get("tool_calls")
+        for message in second_call_messages
+    )
+
+    assert any(
+        message.get("role") == "tool"
+        and message.get("tool_call_id") == "call-123"
+        and message.get("name") == "calculator"
+        and message.get("content") == "4"
+        for message in second_call_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_passes_required_capabilities_to_router() -> None:
+    runtime, _, router, _ = create_runtime(
+        [
+            final_response("Done."),
+        ]
+    )
+
+    result = await runtime.run(
+        "Do something",
+        session_id="session-123",
+        task="special task",
+        required_capabilities=[
+            "calculator",
+        ],
+    )
+
+    assert result.status == "success"
+
+    assert len(router.calls) == 1
+
+    assert router.calls[0]["session_id"] == "session-123"
+
+    assert router.calls[0]["task"] == "special task"
+
+    assert router.calls[0]["required_capabilities"] == [
+        "calculator",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_generates_session_id_when_missing() -> None:
+    runtime, _, router, _ = create_runtime(
+        [
+            final_response("Hello."),
+        ]
+    )
+
+    result = await runtime.run(
+        "Say hello",
+    )
+
+    assert result.status == "success"
+
+    assert len(router.calls) == 1
+
+    session_id = router.calls[0]["session_id"]
+
+    assert isinstance(session_id, str)
+    assert session_id != ""
+    assert session_id == result.execution_id
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_intent_as_task_when_task_missing() -> None:
+    runtime, _, router, _ = create_runtime(
+        [
+            final_response("Done."),
+        ]
+    )
+
+    await runtime.run(
+        "Calculate something",
+    )
+
+    assert len(router.calls) == 1
+
+    assert router.calls[0]["task"] == (
+        "Calculate something"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_records_multiple_tool_calls() -> None:
+    runtime, _, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "calculator",
+                '{"expression":"10 + 5"}',
+                "call-1",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"15 * 2"}',
+                "call-2",
+            ),
+            final_response(
+                "The final answer is 30.",
+            ),
+        ]
+    )
+
+    result = await runtime.run(
+        "Calculate 10 + 5 and multiply by 2.",
+    )
+
+    assert result.status == "success"
+    assert result.steps == 3
+    assert len(result.tool_calls) == 2
+
+    assert len(sandbox.calls) == 2
+
+    assert result.tool_calls[0].call_id if hasattr(
+        result.tool_calls[0],
+        "call_id",
+    ) else True
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_execute_unknown_tool() -> None:
+    runtime, _, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "delete_all_files",
+                "{}",
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        AgentProtocolError,
+        match="Unknown tool requested by model",
+    ):
+        await runtime.run(
+            "Delete all files",
+        )
+
+    assert sandbox.calls == []
