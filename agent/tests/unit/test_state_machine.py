@@ -3,10 +3,8 @@ from __future__ import annotations
 import pytest
 
 from app.agent_runtime.domain import ExecutionState
-from app.agent_runtime.state_machine import (
-    ExecutionStateMachine,
-    InvalidExecutionTransitionError,
-)
+from app.agent_runtime.state_machine import ExecutionStateMachine
+from app.core.errors import InvalidStateTransition
 
 
 def test_initial_state_is_created() -> None:
@@ -112,7 +110,7 @@ def test_invalid_transition_is_rejected(
     )
 
     with pytest.raises(
-        InvalidExecutionTransitionError,
+        InvalidStateTransition,
         match="Invalid execution state transition",
     ):
         machine.transition_to(target)

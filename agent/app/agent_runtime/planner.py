@@ -8,7 +8,10 @@ from app.agent_runtime.domain import (
     DecisionType,
     ExecutionContext,
 )
-from app.core.errors import AgentProtocolError
+from app.core.errors import (
+    AgentProtocolError,
+    PlanningError,
+)
 from app.tools.registry import ToolRegistry
 
 
@@ -55,6 +58,24 @@ class Planner:
                 |
                 v
              Sandbox
+
+    Error boundary:
+
+        Invalid inference/decision data
+                |
+                v
+        AgentProtocolError
+                |
+                v
+          DecisionError
+
+        Unexpected Planner failure
+                |
+                v
+           PlanningError
+                |
+                v
+           AgentError
     """
 
     def __init__(
@@ -86,21 +107,48 @@ class Planner:
 
         CONTINUE and FAIL are part of the domain model and will be
         introduced when the runtime has explicit semantics for them.
+
+        Error handling:
+
+        AgentProtocolError represents invalid or malformed inference
+        output. It is preserved for backward compatibility and is a
+        DecisionError through the Agenyx error hierarchy.
+
+        Any unexpected exception raised inside the Planner is converted
+        into PlanningError so callers do not need to understand Planner
+        implementation details.
         """
 
-        self._validate_context(context)
+        try:
+            self._validate_context(context)
 
-        message = self._extract_message(response)
+            message = self._extract_message(response)
 
-        tool_calls = self._extract_tool_calls(message)
+            tool_calls = self._extract_tool_calls(message)
 
-        if tool_calls:
-            return self._plan_tool_call(
-                tool_calls[0],
-                context=context,
-            )
+            if tool_calls:
+                return self._plan_tool_call(
+                    tool_calls[0],
+                    context=context,
+                )
 
-        return self._plan_final_response(message)
+            return self._plan_final_response(message)
+
+        except AgentProtocolError:
+            # Invalid inference output or invalid decision structure.
+            #
+            # Keep the existing exception intact because it is already
+            # part of the Planner's public contract and inherits from
+            # DecisionError.
+            raise
+
+        except Exception as exc:
+            # Any unexpected Planner failure is an internal planning
+            # failure. Do not leak implementation-specific exceptions
+            # such as KeyError, TypeError, RuntimeError, etc.
+            raise PlanningError(
+                "Planner failed while creating an agent decision"
+            ) from exc
 
     @staticmethod
     def _validate_context(
