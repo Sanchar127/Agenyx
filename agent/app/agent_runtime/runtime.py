@@ -5,6 +5,7 @@ from typing import Any
 
 from app.agent_runtime.domain import (
     Execution,
+    ExecutionContext,
     ExecutionResult,
     ExecutionStatus,
 )
@@ -27,6 +28,7 @@ class AgentRuntime:
 
     Responsibilities:
     - create and manage an agent execution
+    - create and maintain execution context
     - maintain the reasoning loop
     - ask semantic router for model selection
     - call inference service
@@ -74,11 +76,22 @@ class AgentRuntime:
 
         execution = Execution()
 
+        context = ExecutionContext(
+            execution=execution,
+        )
+
         if not session_id:
             session_id = str(execution.id)
 
         if not task:
             task = intent
+
+        context.metadata.update(
+            {
+                "session_id": session_id,
+                "task": task,
+            }
+        )
 
         execution.metadata.update(
             {
@@ -98,7 +111,7 @@ class AgentRuntime:
 
         try:
             result = await self._execute(
-                execution=execution,
+                context=context,
                 intent=intent,
                 session_id=session_id,
                 task=task,
@@ -110,6 +123,8 @@ class AgentRuntime:
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
+
+            context.add_error(str(exc))
 
             logger.exception(
                 "agent_execution_failed "
@@ -144,7 +159,7 @@ class AgentRuntime:
     async def _execute(
         self,
         *,
-        execution: Execution,
+        context: ExecutionContext,
         intent: str,
         session_id: str,
         task: str,
@@ -162,6 +177,9 @@ class AgentRuntime:
             },
         ]
 
+        for message in messages:
+            context.add_message(message)
+
         tool_definitions = self.tools.definitions()
 
         decision = await self.router.route(
@@ -172,6 +190,15 @@ class AgentRuntime:
         )
 
         selected_model = decision.model
+
+        context.metadata.update(
+            {
+                "model": decision.model,
+                "provider": decision.provider,
+            }
+        )
+
+        execution = context.execution
 
         execution.metadata["model"] = decision.model
         execution.metadata["provider"] = decision.provider
@@ -187,6 +214,8 @@ class AgentRuntime:
         executed_tools: list[ToolCallResult] = []
 
         for step in range(1, self.max_steps + 1):
+
+            context.current_step = step
 
             logger.info(
                 "agent_step_started "
@@ -211,6 +240,8 @@ class AgentRuntime:
                     "Inference response is missing message"
                 )
 
+            context.add_message(message)
+
             tool_calls = message.get("tool_calls", [])
 
             if not isinstance(tool_calls, list):
@@ -233,6 +264,11 @@ class AgentRuntime:
                     executed_tools
                 )
 
+                context.metadata["steps"] = step
+                context.metadata["tool_calls"] = list(
+                    executed_tools
+                )
+
                 return ExecutionResult.from_execution(
                     execution,
                     output=content,
@@ -244,6 +280,15 @@ class AgentRuntime:
 
                 name, arguments, call_id = (
                     self._parse_tool_call(tool_call)
+                )
+
+                context.add_tool_call(
+                    {
+                        "name": name,
+                        "arguments": arguments,
+                        "call_id": call_id,
+                        "step": step,
+                    }
                 )
 
                 logger.info(
@@ -267,7 +312,20 @@ class AgentRuntime:
                     )
                 )
 
+                context.add_observation(
+                    f"Tool '{name}' returned: {result}"
+                )
+
                 messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result,
+                    }
+                )
+
+                context.add_message(
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
