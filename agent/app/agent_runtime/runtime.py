@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
-
+from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.domain import (
     AgentDecision,
     Execution,
@@ -74,7 +74,10 @@ class AgentRuntime:
             raise ValueError(
                 "max_steps must be greater than zero"
             )
-
+        self.limits = ExecutionLimits(
+            max_steps=max_steps,
+            max_tool_calls=20,
+        )
         self.router = router
         self.inference = inference
         self.tools = tools
@@ -272,12 +275,9 @@ class AgentRuntime:
         # REASONING LOOP
         # =========================================================
 
-        for step_number in range(
-            1,
-            self.max_steps + 1,
-        ):
+        for step_number in range(1, self.limits.max_steps + 1):
             context.current_step = step_number
-
+            self.limits.validate_step(step_number)
             # -----------------------------------------------------
             # INFERENCE STATE
             # -----------------------------------------------------
@@ -474,6 +474,10 @@ class AgentRuntime:
                 "Unknown tool requested by model: "
                 f"{tool_name}"
             )
+
+        self.limits.validate_tool_call(
+            context.tool_call_count
+        )
 
         # =========================================================
         # ASSISTANT MESSAGE
