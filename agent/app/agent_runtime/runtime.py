@@ -1,7 +1,8 @@
-
 from __future__ import annotations
 
+import time
 from typing import Any
+
 from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.domain import (
     AgentDecision,
@@ -54,9 +55,18 @@ class AgentRuntime:
     means the runtime permits at most N reasoning/inference
     iterations.
 
-    Once N iterations have been consumed, the runtime does not
-    start another iteration. If no final answer has been produced,
-    ExecutionLimitExceeded is raised.
+    max_tool_calls = N
+
+    means the runtime permits at most N successful tool executions.
+
+    timeout_seconds = N
+
+    means the runtime permits the execution to continue for at
+    most N seconds of wall-clock execution time.
+
+    Timeout checks happen at execution boundaries. They do not
+    yet forcibly interrupt an inference or tool operation that is
+    already running.
     """
 
     def __init__(
@@ -74,14 +84,20 @@ class AgentRuntime:
             raise ValueError(
                 "max_steps must be greater than zero"
             )
+
         self.limits = ExecutionLimits(
             max_steps=max_steps,
             max_tool_calls=20,
+            timeout_seconds=60.0,
         )
+
         self.router = router
         self.inference = inference
         self.tools = tools
         self.planner = planner
+
+        # Retained for backward compatibility with existing
+        # callers and tests.
         self.max_steps = max_steps
 
         if tool_executor is not None:
@@ -197,9 +213,23 @@ class AgentRuntime:
 
         Raises:
             AgentMaxStepsError:
-                When the configured execution limit is exhausted
-                without producing a final answer.
+                When the configured execution step limit is
+                exhausted without producing a final answer.
+
+            ExecutionLimitExceeded:
+                When the execution timeout is exceeded.
         """
+
+        # =========================================================
+        # EXECUTION TIMER
+        # =========================================================
+        #
+        # Use monotonic time because it is appropriate for measuring
+        # elapsed duration and is not affected by system clock
+        # adjustments.
+        # =========================================================
+
+        execution_started_at = time.monotonic()
 
         # =========================================================
         # PLAN
@@ -240,6 +270,14 @@ class AgentRuntime:
         plan_step.mark_completed()
 
         # =========================================================
+        # TIMEOUT CHECK AFTER PLANNING
+        # =========================================================
+
+        self.limits.validate_timeout(
+            execution_started_at
+        )
+
+        # =========================================================
         # TOOL DEFINITIONS
         # =========================================================
 
@@ -249,11 +287,19 @@ class AgentRuntime:
         # ROUTING
         # =========================================================
 
+        self.limits.validate_timeout(
+            execution_started_at
+        )
+
         route = await self.router.route(
             session_id=session_id,
             task=task,
             messages=context.messages,
             required_capabilities=required_capabilities,
+        )
+
+        self.limits.validate_timeout(
+            execution_started_at
         )
 
         selected_model = route.model
@@ -275,9 +321,28 @@ class AgentRuntime:
         # REASONING LOOP
         # =========================================================
 
-        for step_number in range(1, self.limits.max_steps + 1):
+        for step_number in range(
+            1,
+            self.limits.max_steps + 1,
+        ):
             context.current_step = step_number
-            self.limits.validate_step(step_number)
+
+            # -----------------------------------------------------
+            # STEP LIMIT
+            # -----------------------------------------------------
+
+            self.limits.validate_step(
+                step_number
+            )
+
+            # -----------------------------------------------------
+            # EXECUTION TIME LIMIT
+            # -----------------------------------------------------
+
+            self.limits.validate_timeout(
+                execution_started_at
+            )
+
             # -----------------------------------------------------
             # INFERENCE STATE
             # -----------------------------------------------------
@@ -311,7 +376,9 @@ class AgentRuntime:
                     )
                 )
 
-                inference_step.output = inference_response
+                inference_step.output = (
+                    inference_response
+                )
 
                 inference_step.mark_completed()
 
@@ -321,6 +388,18 @@ class AgentRuntime:
                 )
 
                 raise
+
+            # -----------------------------------------------------
+            # TIMEOUT CHECK AFTER INFERENCE
+            # -----------------------------------------------------
+            #
+            # This catches an inference operation that returned
+            # after the configured execution budget.
+            # -----------------------------------------------------
+
+            self.limits.validate_timeout(
+                execution_started_at
+            )
 
             # -----------------------------------------------------
             # PLANNER
@@ -336,7 +415,9 @@ class AgentRuntime:
                 extra={
                     "execution_id": str(execution.id),
                     "step": step_number,
-                    "decision_type": str(decision.type),
+                    "decision_type": str(
+                        decision.type
+                    ),
                 },
             )
 
@@ -407,6 +488,7 @@ class AgentRuntime:
                     context=context,
                     inference_response=inference_response,
                     decision=decision,
+                    execution_started_at=execution_started_at,
                 )
 
                 continue
@@ -416,7 +498,8 @@ class AgentRuntime:
             # =====================================================
 
             raise AgentProtocolError(
-                f"Unsupported agent decision type: {decision.type}"
+                "Unsupported agent decision type: "
+                f"{decision.type}"
             )
 
         # =========================================================
@@ -427,9 +510,6 @@ class AgentRuntime:
         # iteration.
         #
         # No additional inference call is permitted.
-        #
-        # AgentMaxStepsError inherits from ExecutionLimitExceeded,
-        # so callers can catch either abstraction.
         # =========================================================
 
         raise AgentMaxStepsError(
@@ -444,9 +524,13 @@ class AgentRuntime:
         context: ExecutionContext,
         inference_response: Any,
         decision: AgentDecision,
+        execution_started_at: float,
     ) -> None:
         """
         Execute one tool call and append its observation to context.
+
+        The execution-level tool-call and timeout limits are checked
+        before the actual ToolExecutor invocation.
         """
 
         tool_name = decision.tool_name
@@ -475,8 +559,20 @@ class AgentRuntime:
                 f"{tool_name}"
             )
 
+        # ---------------------------------------------------------
+        # TOOL CALL LIMIT
+        # ---------------------------------------------------------
+
         self.limits.validate_tool_call(
             context.tool_call_count
+        )
+
+        # ---------------------------------------------------------
+        # EXECUTION TIME LIMIT
+        # ---------------------------------------------------------
+
+        self.limits.validate_timeout(
+            execution_started_at
         )
 
         # =========================================================
@@ -532,6 +628,14 @@ class AgentRuntime:
             },
         )
 
+        # ---------------------------------------------------------
+        # FINAL TIMEOUT CHECK BEFORE SANDBOX
+        # ---------------------------------------------------------
+
+        self.limits.validate_timeout(
+            execution_started_at
+        )
+
         try:
             tool_result = (
                 await self.tool_executor.execute(
@@ -546,6 +650,14 @@ class AgentRuntime:
             )
 
             raise
+
+        # =========================================================
+        # TIMEOUT CHECK AFTER TOOL EXECUTION
+        # =========================================================
+
+        self.limits.validate_timeout(
+            execution_started_at
+        )
 
         # =========================================================
         # TOOL FAILURE

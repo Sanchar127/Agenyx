@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from app.core.errors import (
     AgentMaxStepsError,
@@ -17,13 +18,12 @@ class ExecutionLimits:
 
     - maximum inference/execution steps
     - maximum tool calls
-
-    The policy is immutable so limits cannot be changed while an
-    execution is already running.
+    - maximum total execution time
     """
 
     max_steps: int = 10
     max_tool_calls: int = 20
+    timeout_seconds: float = 60.0
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -34,6 +34,11 @@ class ExecutionLimits:
         if self.max_tool_calls < 0:
             raise ValueError(
                 "max_tool_calls cannot be negative"
+            )
+
+        if self.timeout_seconds <= 0:
+            raise ValueError(
+                "timeout_seconds must be greater than zero"
             )
 
     def validate_step(self, step: int) -> None:
@@ -47,10 +52,7 @@ class ExecutionLimits:
                 f"{self.max_steps}"
             )
 
-    def validate_tool_call(
-        self,
-        tool_calls: int,
-    ) -> None:
+    def validate_tool_call(self, tool_calls: int) -> None:
         """
         Validate that another tool call is permitted.
 
@@ -62,4 +64,19 @@ class ExecutionLimits:
             raise ExecutionLimitExceeded(
                 "Agent exceeded maximum tool calls: "
                 f"{self.max_tool_calls}"
+            )
+
+    def validate_timeout(self, started_at: float) -> None:
+        """
+        Validate that the execution has not exceeded its time budget.
+
+        `started_at` must come from time.monotonic().
+        """
+
+        elapsed = time.monotonic() - started_at
+
+        if elapsed >= self.timeout_seconds:
+            raise ExecutionLimitExceeded(
+                "Agent execution exceeded timeout: "
+                f"{self.timeout_seconds} seconds"
             )
