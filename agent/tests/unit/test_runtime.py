@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from app.agent_runtime.cancellation import CancellationToken
 from app.agent_runtime.domain import (
     AgentDecision,
     DecisionType,
@@ -15,11 +16,13 @@ from app.agent_runtime.runtime import AgentRuntime
 from app.core.errors import (
     AgentMaxStepsError,
     AgentProtocolError,
+    ExecutionCancelled,
     ExecutionLimitExceeded,
     ToolExecutionError,
 )
 from app.tools.builtin import create_tool_registry
 from app.tools.executor import ToolExecutor
+
 
 class FakeInference:
     """In-memory fake for the InferenceClient boundary."""
@@ -53,14 +56,15 @@ class FakeInference:
 
         return self.responses.pop(0)
 
+
 class HangingInference:
     """
     Inference fake that never completes unless Runtime
-    cancels the coroutine because the execution timeout expires.
+    cancels the coroutine.
     """
 
     def __init__(self) -> None:
-        self.started = False
+        self.started = asyncio.Event()
         self.cancelled = False
 
     async def complete(
@@ -70,13 +74,14 @@ class HangingInference:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        self.started = True
+        self.started.set()
 
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
 
 class FakeRouter:
     """In-memory fake for semantic model routing."""
@@ -180,14 +185,15 @@ class FakePlanner:
 
         return self.decisions.pop(0)
 
+
 class HangingToolExecutor:
     """
     Tool executor fake that never completes unless Runtime
-    cancels the coroutine because the execution timeout expires.
+    cancels the coroutine.
     """
 
     def __init__(self) -> None:
-        self.started = False
+        self.started = asyncio.Event()
         self.cancelled = False
 
     async def execute(
@@ -196,13 +202,14 @@ class HangingToolExecutor:
         name: str,
         arguments: dict[str, Any],
     ) -> Any:
-        self.started = True
+        self.started.set()
 
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             self.cancelled = True
             raise
+
 
 def create_runtime(
     responses: list[dict[str, Any]],
@@ -300,6 +307,58 @@ def final_response(
             }
         ]
     }
+
+
+# ============================================================
+# CancellationToken tests
+# ============================================================
+
+
+def test_cancellation_token_starts_not_cancelled() -> None:
+    token = CancellationToken()
+
+    assert token.is_cancelled is False
+
+
+def test_cancellation_token_cancel_marks_cancelled() -> None:
+    token = CancellationToken()
+
+    token.cancel()
+
+    assert token.is_cancelled is True
+
+
+def test_cancellation_token_raise_does_nothing_before_cancel() -> None:
+    token = CancellationToken()
+
+    token.raise_if_cancelled()
+
+
+def test_cancellation_token_raise_if_cancelled() -> None:
+    token = CancellationToken()
+
+    token.cancel()
+
+    with pytest.raises(
+        ExecutionCancelled,
+        match="Agent execution was cancelled",
+    ):
+        token.raise_if_cancelled()
+
+
+def test_cancellation_token_cancel_is_idempotent() -> None:
+    token = CancellationToken()
+
+    token.cancel()
+    token.cancel()
+    token.cancel()
+
+    assert token.is_cancelled is True
+
+
+# ============================================================
+# Basic Runtime tests
+# ============================================================
 
 
 @pytest.mark.asyncio
@@ -433,6 +492,11 @@ async def test_agent_supports_multiple_steps() -> None:
     ]
 
 
+# ============================================================
+# Execution limits
+# ============================================================
+
+
 @pytest.mark.asyncio
 async def test_agent_enforces_max_steps() -> None:
     runtime, inference, _, sandbox = create_runtime(
@@ -457,6 +521,129 @@ async def test_agent_enforces_max_steps() -> None:
 
     assert len(sandbox.calls) == 3
     assert len(inference.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_hard_cancels_hanging_inference() -> None:
+    runtime, _, router, sandbox = create_runtime(
+        [
+            final_response("unused"),
+        ]
+    )
+
+    inference = HangingInference()
+
+    runtime.inference = inference
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        timeout_seconds=0.05,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="inference exceeded execution timeout",
+    ):
+        await runtime.run(
+            "Hang forever",
+        )
+
+    assert inference.started.is_set() is True
+    assert inference.cancelled is True
+
+    assert sandbox.calls == []
+
+    assert len(router.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_hard_cancels_hanging_tool_execution() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+            ),
+        ]
+    )
+
+    hanging_executor = HangingToolExecutor()
+
+    runtime.tool_executor = hanging_executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        timeout_seconds=0.05,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="tool execution exceeded execution timeout",
+    ):
+        await runtime.run(
+            "Calculate 1 + 1",
+        )
+
+    assert hanging_executor.started.is_set() is True
+    assert hanging_executor.cancelled is True
+
+    assert len(inference.calls) == 1
+
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_repeated_identical_tool_calls() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-1",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-2",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-3",
+            ),
+            tool_call_response(
+                "calculator",
+                '{"expression":"1 + 1"}',
+                "call-4",
+            ),
+        ]
+    )
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=3,
+        timeout_seconds=60.0,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum repeated tool calls",
+    ):
+        await runtime.run(
+            "Keep calculating 1 + 1",
+        )
+
+    assert len(sandbox.calls) == 3
+
+    assert len(inference.calls) == 4
+
+
+# ============================================================
+# Protocol / validation failures
+# ============================================================
 
 
 @pytest.mark.asyncio
@@ -529,6 +716,11 @@ async def test_tool_failure_is_not_silently_ignored() -> None:
     )
 
 
+# ============================================================
+# Inference message handling
+# ============================================================
+
+
 @pytest.mark.asyncio
 async def test_agent_passes_tool_messages_back_to_inference() -> None:
     runtime, inference, _, _ = create_runtime(
@@ -566,6 +758,11 @@ async def test_agent_passes_tool_messages_back_to_inference() -> None:
         and message.get("content") == "4"
         for message in second_call_messages
     )
+
+
+# ============================================================
+# Router handling
+# ============================================================
 
 
 @pytest.mark.asyncio
@@ -640,6 +837,11 @@ async def test_agent_uses_intent_as_task_when_task_missing() -> None:
     )
 
 
+# ============================================================
+# Multiple tool calls
+# ============================================================
+
+
 @pytest.mark.asyncio
 async def test_agent_records_multiple_tool_calls() -> None:
     runtime, _, _, sandbox = create_runtime(
@@ -703,6 +905,11 @@ async def test_agent_does_not_execute_unknown_tool() -> None:
         )
 
     assert sandbox.calls == []
+
+
+# ============================================================
+# AgentDecision handling
+# ============================================================
 
 
 @pytest.mark.asyncio
@@ -887,41 +1094,90 @@ async def test_agent_decision_fail_does_not_execute_tools() -> None:
 
     assert sandbox.calls == []
 
+
+# ============================================================
+# Step 11 — Cancellation
+# ============================================================
+
+
 @pytest.mark.asyncio
-async def test_agent_hard_cancels_hanging_inference() -> None:
+async def test_runtime_cancel_unknown_execution_returns_false() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Hello."),
+        ]
+    )
+
+    cancelled = await runtime.cancel(
+        "does-not-exist",
+    )
+
+    assert cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancel_active_inference_execution() -> None:
     runtime, _, router, sandbox = create_runtime(
         [
             final_response("unused"),
         ]
     )
 
-    inference = HangingInference()
+    hanging_inference = HangingInference()
 
-    runtime.inference = inference
+    runtime.inference = hanging_inference
 
-    runtime.limits = ExecutionLimits(
-        max_steps=8,
-        max_tool_calls=20,
-        timeout_seconds=0.05,
+    task = asyncio.create_task(
+        runtime.run(
+            "Hang until cancelled",
+        )
     )
 
-    with pytest.raises(
-        ExecutionLimitExceeded,
-        match="inference exceeded execution timeout",
-    ):
-        await runtime.run(
-            "Hang forever",
-        )
+    # Wait until inference is actually running.
+    await asyncio.wait_for(
+        hanging_inference.started.wait(),
+        timeout=1.0,
+    )
 
-    assert inference.started is True
-    assert inference.cancelled is True
+    # Runtime should now have registered the execution.
+    assert runtime._active_executions
+
+    execution_id = next(
+        iter(runtime._active_executions)
+    )
+
+    assert runtime.is_active(
+        execution_id,
+    ) is True
+
+    cancelled = await runtime.cancel(
+        execution_id,
+    )
+
+    assert cancelled is True
+
+    result = await asyncio.wait_for(
+        task,
+        timeout=1.0,
+    )
+
+    assert hanging_inference.cancelled is True
+
+    assert result.status == "cancelled"
+
+    assert result.execution_id == execution_id
+
+    assert runtime.is_active(
+        execution_id,
+    ) is False
 
     assert sandbox.calls == []
 
     assert len(router.calls) == 1
 
+
 @pytest.mark.asyncio
-async def test_agent_hard_cancels_hanging_tool_execution() -> None:
+async def test_runtime_cancel_active_tool_execution() -> None:
     runtime, inference, _, sandbox = create_runtime(
         [
             tool_call_response(
@@ -935,72 +1191,183 @@ async def test_agent_hard_cancels_hanging_tool_execution() -> None:
 
     runtime.tool_executor = hanging_executor
 
-    runtime.limits = ExecutionLimits(
-        max_steps=8,
-        max_tool_calls=20,
-        timeout_seconds=0.05,
-    )
-
-    with pytest.raises(
-        ExecutionLimitExceeded,
-        match="tool execution exceeded execution timeout",
-    ):
-        await runtime.run(
+    task = asyncio.create_task(
+        runtime.run(
             "Calculate 1 + 1",
         )
+    )
 
-    assert hanging_executor.started is True
+    # Wait until tool execution is actually running.
+    await asyncio.wait_for(
+        hanging_executor.started.wait(),
+        timeout=1.0,
+    )
+
+    assert runtime._active_executions
+
+    execution_id = next(
+        iter(runtime._active_executions)
+    )
+
+    assert runtime.is_active(
+        execution_id,
+    ) is True
+
+    cancelled = await runtime.cancel(
+        execution_id,
+    )
+
+    assert cancelled is True
+
+    result = await asyncio.wait_for(
+        task,
+        timeout=1.0,
+    )
+
     assert hanging_executor.cancelled is True
+
+    assert result.status == "cancelled"
+
+    assert result.execution_id == execution_id
+
+    assert runtime.is_active(
+        execution_id,
+    ) is False
 
     assert len(inference.calls) == 1
 
+    # The fake sandbox must never be reached because the
+    # ToolExecutor itself was cancelled.
     assert sandbox.calls == []
 
+
 @pytest.mark.asyncio
-async def test_agent_rejects_repeated_identical_tool_calls() -> None:
-    runtime, inference, _, sandbox = create_runtime(
+async def test_runtime_cancel_cleans_up_active_execution() -> None:
+    runtime, _, _, _ = create_runtime(
         [
-            tool_call_response(
-                "calculator",
-                '{"expression":"1 + 1"}',
-                "call-1",
-            ),
-            tool_call_response(
-                "calculator",
-                '{"expression":"1 + 1"}',
-                "call-2",
-            ),
-            tool_call_response(
-                "calculator",
-                '{"expression":"1 + 1"}',
-                "call-3",
-            ),
-            tool_call_response(
-                "calculator",
-                '{"expression":"1 + 1"}',
-                "call-4",
-            ),
+            final_response("unused"),
         ]
     )
 
-    runtime.limits = ExecutionLimits(
-        max_steps=8,
-        max_tool_calls=20,
-        max_repeated_tool_calls=3,
-        timeout_seconds=60.0,
+    hanging_inference = HangingInference()
+
+    runtime.inference = hanging_inference
+
+    task = asyncio.create_task(
+        runtime.run(
+            "Cancel this execution",
+        )
     )
 
-    with pytest.raises(
-        ExecutionLimitExceeded,
-        match="maximum repeated tool calls",
-    ):
-        await runtime.run(
-            "Keep calculating 1 + 1",
+    await asyncio.wait_for(
+        hanging_inference.started.wait(),
+        timeout=1.0,
+    )
+
+    assert runtime._active_executions
+
+    execution_id = next(
+        iter(runtime._active_executions)
+    )
+
+    assert runtime.is_active(
+        execution_id,
+    ) is True
+
+    cancelled = await runtime.cancel(
+        execution_id,
+    )
+
+    assert cancelled is True
+
+    result = await asyncio.wait_for(
+        task,
+        timeout=1.0,
+    )
+
+    assert result.status == "cancelled"
+
+    # The finally block in Runtime must remove the
+    # execution from the active execution registry.
+    assert runtime.is_active(
+        execution_id,
+    ) is False
+
+    assert execution_id not in (
+        runtime._active_executions
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancel_same_execution_twice() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("unused"),
+        ]
+    )
+
+    hanging_inference = HangingInference()
+
+    runtime.inference = hanging_inference
+
+    task = asyncio.create_task(
+        runtime.run(
+            "Cancel this execution twice",
         )
+    )
 
-    # The first three identical tool calls are executed.
-    assert len(sandbox.calls) == 3
+    await asyncio.wait_for(
+        hanging_inference.started.wait(),
+        timeout=1.0,
+    )
 
-    # The fourth inference response requests the fourth identical
-    # tool call, which is then rejected by the repeated-call limit.
-    assert len(inference.calls) == 4
+    execution_id = next(
+        iter(runtime._active_executions)
+    )
+
+    first_cancel = await runtime.cancel(
+        execution_id,
+    )
+
+    assert first_cancel is True
+
+    result = await asyncio.wait_for(
+        task,
+        timeout=1.0,
+    )
+
+    assert result.status == "cancelled"
+
+    # The execution has already been removed.
+    # A second cancellation request must therefore
+    # return False.
+    second_cancel = await runtime.cancel(
+        execution_id,
+    )
+
+    assert second_cancel is False
+
+
+@pytest.mark.asyncio
+async def test_completed_execution_is_no_longer_active() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Completed."),
+        ]
+    )
+
+    result = await runtime.run(
+        "Complete normally",
+    )
+
+    assert result.status == "success"
+
+    assert runtime.is_active(
+        result.execution_id,
+    ) is False
+
+    cancelled = await runtime.cancel(
+        result.execution_id,
+    )
+
+    assert cancelled is False
