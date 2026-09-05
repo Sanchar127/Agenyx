@@ -6,6 +6,7 @@ from app.agent_runtime.domain import (
     Execution,
     ExecutionContext,
     ExecutionResult,
+    ExecutionState,
     ExecutionStatus,
     Step,
     StepType,
@@ -35,6 +36,7 @@ class AgentRuntime:
     - execute approved tool decisions through the sandbox
     - record execution steps
     - maintain conversation messages
+    - drive the execution state machine
     - produce an execution result
 
     Not responsible for:
@@ -47,7 +49,27 @@ class AgentRuntime:
     - tool isolation
     - HTTP gateway concerns
     - persistence
-    - lifecycle transition policy
+
+    Execution lifecycle is controlled explicitly through ExecutionState:
+
+        CREATED
+           |
+           v
+        PLANNING
+           |
+           v
+        INFERENCE
+         /      \
+        v        v
+    TOOL_EXECUTION  COMPLETED
+        |
+        v
+    OBSERVING
+        |
+        v
+    INFERENCE
+
+    Any active state may transition to FAILED or CANCELLED.
     """
 
     def __init__(
@@ -80,6 +102,24 @@ class AgentRuntime:
         task: str = "",
         required_capabilities: list[str] | None = None,
     ) -> AgentResponse:
+        """
+        Run one complete agent execution.
+
+        The Runtime is responsible for driving the execution lifecycle.
+
+        Initial transition:
+
+            CREATED -> PLANNING
+
+        Successful execution:
+
+            ... -> INFERENCE -> COMPLETED
+
+        Failure:
+
+            active state -> FAILED
+        """
+
         execution = Execution()
 
         context = ExecutionContext(
@@ -113,7 +153,13 @@ class AgentRuntime:
             session_id,
         )
 
-        execution.mark_started()
+        # ---------------------------------------------------------
+        # EXECUTION STATE: CREATED -> PLANNING
+        # ---------------------------------------------------------
+
+        execution.transition_to(
+            ExecutionState.PLANNING
+        )
 
         try:
             result = await self._execute(
@@ -125,12 +171,18 @@ class AgentRuntime:
             )
 
         except Exception as exc:
+            # -----------------------------------------------------
+            # EXECUTION STATE: ACTIVE -> FAILED
+            # -----------------------------------------------------
+
             execution.mark_failed(
                 error=str(exc),
                 error_type=type(exc).__name__,
             )
 
-            context.add_error(str(exc))
+            context.add_error(
+                str(exc)
+            )
 
             logger.exception(
                 "agent_execution_failed "
@@ -141,7 +193,13 @@ class AgentRuntime:
 
             raise
 
-        execution.mark_completed()
+        # ---------------------------------------------------------
+        # EXECUTION STATE: INFERENCE -> COMPLETED
+        # ---------------------------------------------------------
+
+        execution.transition_to(
+            ExecutionState.COMPLETED
+        )
 
         result = ExecutionResult.from_execution(
             execution,
@@ -179,6 +237,8 @@ class AgentRuntime:
         task: str,
         required_capabilities: list[str] | None,
     ) -> ExecutionResult:
+        execution = context.execution
+
         # ---------------------------------------------------------
         # STEP: PLAN
         # ---------------------------------------------------------
@@ -211,6 +271,7 @@ class AgentRuntime:
 
         tool_definitions = self.tools.definitions()
 
+        # Router selection belongs to the planning phase.
         decision = await self.router.route(
             session_id=session_id,
             task=task,
@@ -226,8 +287,6 @@ class AgentRuntime:
                 "provider": decision.provider,
             }
         )
-
-        execution = context.execution
 
         execution.metadata.update(
             {
@@ -262,11 +321,33 @@ class AgentRuntime:
 
             logger.info(
                 "agent_step_started "
-                "execution_id=%s step=%s model=%s",
+                "execution_id=%s step=%s model=%s state=%s",
                 execution.id,
                 step,
                 selected_model,
+                execution.state,
             )
+
+            # -----------------------------------------------------
+            # EXECUTION STATE -> INFERENCE
+            # -----------------------------------------------------
+
+            if execution.state is ExecutionState.PLANNING:
+                execution.transition_to(
+                    ExecutionState.INFERENCE
+                )
+
+            elif execution.state is ExecutionState.OBSERVING:
+                execution.transition_to(
+                    ExecutionState.INFERENCE
+                )
+
+            elif execution.state is not ExecutionState.INFERENCE:
+                raise RuntimeError(
+                    "Agent runtime reached inference loop "
+                    "from invalid execution state "
+                    f"'{execution.state.value}'"
+                )
 
             # -----------------------------------------------------
             # STEP: INFERENCE
@@ -290,23 +371,26 @@ class AgentRuntime:
                     messages=context.messages,
                     tools=tool_definitions,
                 )
+
             except Exception as exc:
                 inference_step.mark_failed(
                     error=str(exc),
                 )
                 raise
+
             else:
                 inference_step.mark_completed(
                     output=response,
                 )
 
+            # Planner owns inference-response interpretation.
             decision = self.planner.plan(
                 response=response,
                 context=context,
             )
 
             # -----------------------------------------------------
-            # STEP: FINAL
+            # FINAL RESPONSE
             # -----------------------------------------------------
 
             if decision.is_final:
@@ -330,7 +414,7 @@ class AgentRuntime:
                 )
 
             # -----------------------------------------------------
-            # STEP: TOOL CALL
+            # TOOL CALL
             # -----------------------------------------------------
 
             if decision.is_tool_call:
@@ -340,6 +424,16 @@ class AgentRuntime:
                 tool_name = decision.tool_name
                 arguments = decision.arguments
                 call_id = decision.call_id
+
+                # -------------------------------------------------
+                # EXECUTION STATE:
+                #
+                # INFERENCE -> TOOL_EXECUTION
+                # -------------------------------------------------
+
+                execution.transition_to(
+                    ExecutionState.TOOL_EXECUTION
+                )
 
                 assistant_message = (
                     self._extract_assistant_message(
@@ -360,6 +454,10 @@ class AgentRuntime:
                     }
                 )
 
+                # -------------------------------------------------
+                # STEP: TOOL CALL
+                # -------------------------------------------------
+
                 tool_step = self._start_step(
                     context=context,
                     step_type=StepType.TOOL_CALL,
@@ -372,10 +470,11 @@ class AgentRuntime:
 
                 logger.info(
                     "agent_tool_execution_started "
-                    "execution_id=%s step=%s tool=%s",
+                    "execution_id=%s step=%s tool=%s state=%s",
                     execution.id,
                     step,
                     tool_name,
+                    execution.state,
                 )
 
                 try:
@@ -383,11 +482,13 @@ class AgentRuntime:
                         tool_name,
                         arguments,
                     )
+
                 except Exception as exc:
                     tool_step.mark_failed(
                         error=str(exc),
                     )
                     raise
+
                 else:
                     tool_step.mark_completed(
                         output=result,
@@ -416,6 +517,16 @@ class AgentRuntime:
                         arguments=arguments,
                         result=result,
                     )
+                )
+
+                # -------------------------------------------------
+                # EXECUTION STATE:
+                #
+                # TOOL_EXECUTION -> OBSERVING
+                # -------------------------------------------------
+
+                execution.transition_to(
+                    ExecutionState.OBSERVING
                 )
 
                 # -------------------------------------------------
@@ -453,18 +564,32 @@ class AgentRuntime:
 
                 logger.info(
                     "agent_tool_execution_completed "
-                    "execution_id=%s step=%s tool=%s",
+                    "execution_id=%s step=%s tool=%s state=%s",
                     execution.id,
                     step,
                     tool_name,
+                    execution.state,
                 )
 
+                # The next iteration performs:
+                #
+                # OBSERVING -> INFERENCE
+                #
+                # before calling the inference service again.
                 continue
+
+            # -----------------------------------------------------
+            # UNKNOWN DECISION
+            # -----------------------------------------------------
 
             raise RuntimeError(
                 "Unsupported agent decision type: "
                 f"{decision.type}"
             )
+
+        # ---------------------------------------------------------
+        # MAX STEPS EXCEEDED
+        # ---------------------------------------------------------
 
         raise AgentMaxStepsError(
             "Agent exceeded maximum steps: "
@@ -506,8 +631,7 @@ class AgentRuntime:
         Extract the assistant message after Planner has already
         validated the inference response.
 
-        This is intentionally a small transport extraction helper.
-        All protocol validation belongs to Planner.
+        Planner remains responsible for protocol validation.
         """
 
         choices = response.get(
@@ -557,6 +681,15 @@ class AgentRuntime:
         step: int,
         executed_tools: list[ToolCallResult],
     ) -> ExecutionResult:
+        """
+        Build the execution result payload.
+
+        The actual transition to COMPLETED is intentionally performed
+        by run() after _execute() succeeds.
+
+        This keeps lifecycle ownership centralized in run().
+        """
+
         if not isinstance(
             output,
             str,

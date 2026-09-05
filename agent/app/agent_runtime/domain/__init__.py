@@ -2,6 +2,7 @@ from app.agent_runtime.domain.decision import (
     AgentDecision,
     DecisionType,
 )
+from app.agent_runtime.domain.execution_state import ExecutionState
 from app.agent_runtime.domain.execution import Execution
 from app.agent_runtime.domain.result import ExecutionResult
 from app.agent_runtime.domain.status import ExecutionStatus
@@ -17,6 +18,7 @@ __all__ = [
     "ExecutionResult",
     "ExecutionStatus",
     "ExecutionContext",
+    "ExecutionState",
     "Step",
     "StepStatus",
     "StepType",
