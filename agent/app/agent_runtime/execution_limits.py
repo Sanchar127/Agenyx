@@ -1,7 +1,6 @@
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import time
 
 from app.core.errors import (
@@ -18,8 +17,9 @@ class ExecutionLimits:
     Limits currently supported:
 
     - maximum inference/execution steps
-    - maximum tool calls
+    - maximum total tool calls
     - maximum repeated identical tool calls
+    - maximum calls for an individual tool
     - maximum total execution time
     """
 
@@ -27,6 +27,7 @@ class ExecutionLimits:
     max_tool_calls: int = 20
     max_repeated_tool_calls: int = 3
     timeout_seconds: float = 60.0
+    per_tool_limits: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.max_steps <= 0:
@@ -48,6 +49,22 @@ class ExecutionLimits:
             raise ValueError(
                 "timeout_seconds must be greater than zero"
             )
+
+        for tool_name, limit in self.per_tool_limits.items():
+            if not isinstance(tool_name, str) or not tool_name.strip():
+                raise ValueError(
+                    "per_tool_limits tool names must be non-empty strings"
+                )
+
+            if not isinstance(limit, int):
+                raise ValueError(
+                    "per_tool_limits values must be integers"
+                )
+
+            if limit < 0:
+                raise ValueError(
+                    "per_tool_limits values cannot be negative"
+                )
 
     def validate_step(self, step: int) -> None:
         """
@@ -90,6 +107,32 @@ class ExecutionLimits:
             raise ExecutionLimitExceeded(
                 "Agent exceeded maximum repeated tool calls: "
                 f"{self.max_repeated_tool_calls}"
+            )
+
+    def validate_per_tool_call(
+        self,
+        tool_name: str,
+        tool_calls: int,
+    ) -> None:
+        """
+        Validate that a specific tool has not exceeded its
+        configured call limit.
+
+        If no limit is configured for the tool, the call is allowed.
+
+        `tool_calls` is the number of times this specific tool has
+        already been executed.
+        """
+
+        limit = self.per_tool_limits.get(tool_name)
+
+        if limit is None:
+            return
+
+        if tool_calls >= limit:
+            raise ExecutionLimitExceeded(
+                f"Agent exceeded maximum calls for tool "
+                f"'{tool_name}': {limit}"
             )
 
     def validate_timeout(self, started_at: float) -> None:

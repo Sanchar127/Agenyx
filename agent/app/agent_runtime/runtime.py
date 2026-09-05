@@ -60,12 +60,22 @@ class AgentRuntime:
 
         max_tool_calls = N
 
-    means the runtime permits at most N tool executions.
+    means the runtime permits at most N total tool executions.
 
         max_repeated_tool_calls = N
 
     means the runtime permits at most N executions of the same
     tool with the same arguments during one execution.
+
+        per_tool_limits = {
+            "calculator": 5,
+            "code_executor": 2,
+        }
+
+    means individual tools may have their own execution limits.
+
+    Tools not present in per_tool_limits have no individual
+    tool-specific limit and are still subject to max_tool_calls.
 
         timeout_seconds = N
 
@@ -92,6 +102,10 @@ class AgentRuntime:
         max_steps: int,
         tool_executor: ToolExecutor | None = None,
         sandbox: ToolSandboxClient | None = None,
+        max_tool_calls: int = 20,
+        max_repeated_tool_calls: int = 3,
+        timeout_seconds: float = 60.0,
+        per_tool_limits: dict[str, int] | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError(
@@ -100,9 +114,12 @@ class AgentRuntime:
 
         self.limits = ExecutionLimits(
             max_steps=max_steps,
-            max_tool_calls=20,
-            max_repeated_tool_calls=3,
-            timeout_seconds=60.0,
+            max_tool_calls=max_tool_calls,
+            max_repeated_tool_calls=max_repeated_tool_calls,
+            timeout_seconds=timeout_seconds,
+            per_tool_limits=dict(
+                per_tool_limits or {}
+            ),
         )
 
         self.router = router
@@ -274,24 +291,37 @@ class AgentRuntime:
         # REPEATED TOOL CALL TRACKING
         # =========================================================
         #
-        # The key is:
+        # Key:
         #
         #     (tool_name, serialized_arguments)
         #
         # This state belongs to one execution only.
-        #
-        # Example:
-        #
-        #     calculator({"expression": "2 + 2"}) -> 1
-        #     calculator({"expression": "2 + 2"}) -> 2
-        #     calculator({"expression": "2 + 2"}) -> 3
-        #
-        # The next identical call will be rejected when the
-        # configured max_repeated_tool_calls limit is 3.
         # =========================================================
 
         repeated_tool_calls: dict[
             tuple[str, str],
+            int,
+        ] = {}
+
+        # =========================================================
+        # PER-TOOL CALL TRACKING
+        # =========================================================
+        #
+        # Key:
+        #
+        #     tool_name
+        #
+        # Example:
+        #
+        #     calculator -> 3
+        #     code_executor -> 1
+        #
+        # This allows each configured tool to have its own
+        # execution limit.
+        # =========================================================
+
+        tool_call_counts: dict[
+            str,
             int,
         ] = {}
 
@@ -587,6 +617,7 @@ class AgentRuntime:
                     decision=decision,
                     execution_started_at=execution_started_at,
                     repeated_tool_calls=repeated_tool_calls,
+                    tool_call_counts=tool_call_counts,
                 )
 
                 continue
@@ -621,12 +652,23 @@ class AgentRuntime:
             tuple[str, str],
             int,
         ],
+        tool_call_counts: dict[
+            str,
+            int,
+        ],
     ) -> None:
         """
         Execute one tool call and append its observation to context.
 
-        The execution-level tool-call, repeated-call, and timeout
-        limits are checked before the actual ToolExecutor invocation.
+        Limits are checked before the actual ToolExecutor
+        invocation:
+
+        1. Global tool-call limit
+        2. Per-tool call limit
+        3. Repeated identical tool-call limit
+        4. Execution timeout
+
+        A rejected call never reaches the ToolExecutor or Sandbox.
         """
 
         tool_name = decision.tool_name
@@ -656,7 +698,7 @@ class AgentRuntime:
             )
 
         # =========================================================
-        # TOOL CALL LIMIT
+        # GLOBAL TOOL CALL LIMIT
         # =========================================================
 
         self.limits.validate_tool_call(
@@ -664,12 +706,42 @@ class AgentRuntime:
         )
 
         # =========================================================
+        # PER-TOOL CALL LIMIT
+        # =========================================================
+        #
+        # Example:
+        #
+        #     per_tool_limits = {
+        #         "calculator": 3,
+        #     }
+        #
+        # Calls:
+        #
+        #     calculator #1 -> allowed
+        #     calculator #2 -> allowed
+        #     calculator #3 -> allowed
+        #     calculator #4 -> rejected
+        #
+        # The rejected call never reaches the sandbox.
+        # =========================================================
+
+        tool_call_count = tool_call_counts.get(
+            tool_name,
+            0,
+        )
+
+        self.limits.validate_per_tool_call(
+            tool_name,
+            tool_call_count,
+        )
+
+        # =========================================================
         # REPEATED TOOL CALL LIMIT
         # =========================================================
         #
-        # JSON serialization with sorted keys ensures that
-        # equivalent dictionaries produce the same key even when
-        # their insertion order differs.
+        # JSON serialization with sorted keys ensures equivalent
+        # dictionaries produce the same identity even when their
+        # insertion order differs.
         # =========================================================
 
         tool_call_key = (
@@ -690,8 +762,20 @@ class AgentRuntime:
             repeated_count
         )
 
+        # =========================================================
+        # REGISTER THE ATTEMPT
+        # =========================================================
+        #
+        # The call is registered only after all policy checks have
+        # passed. Therefore rejected calls are not counted.
+        # =========================================================
+
         repeated_tool_calls[tool_call_key] = (
             repeated_count + 1
+        )
+
+        tool_call_counts[tool_name] = (
+            tool_call_count + 1
         )
 
         # =========================================================

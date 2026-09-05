@@ -174,3 +174,64 @@ def test_repeated_tool_call_limit_must_be_positive() -> None:
         ExecutionLimits(
             max_repeated_tool_calls=0,
         )
+
+def test_per_tool_limit_allows_calls_before_limit() -> None:
+    limits = ExecutionLimits(
+        per_tool_limits={
+            "calculator": 3,
+        },
+    )
+
+    limits.validate_per_tool_call("calculator", 0)
+    limits.validate_per_tool_call("calculator", 1)
+    limits.validate_per_tool_call("calculator", 2)
+
+
+def test_per_tool_limit_rejects_calls_at_limit() -> None:
+    limits = ExecutionLimits(
+        per_tool_limits={
+            "calculator": 3,
+        },
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum calls for tool 'calculator'",
+    ):
+        limits.validate_per_tool_call("calculator", 3)
+
+
+def test_unconfigured_tool_has_no_per_tool_limit() -> None:
+    limits = ExecutionLimits(
+        per_tool_limits={
+            "calculator": 3,
+        },
+    )
+
+    limits.validate_per_tool_call("web_search", 100)
+
+
+def test_per_tool_limit_can_be_zero() -> None:
+    limits = ExecutionLimits(
+        per_tool_limits={
+            "calculator": 0,
+        },
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum calls for tool 'calculator'",
+    ):
+        limits.validate_per_tool_call("calculator", 0)
+
+
+def test_per_tool_limit_cannot_be_negative() -> None:
+    with pytest.raises(
+        ValueError,
+        match="per_tool_limits values cannot be negative",
+    ):
+        ExecutionLimits(
+            per_tool_limits={
+                "calculator": -1,
+            },
+        )
