@@ -7,6 +7,8 @@ from app.agent_runtime.domain import (
     ExecutionContext,
     ExecutionResult,
     ExecutionStatus,
+    Step,
+    StepType,
 )
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.prompts import SYSTEM_PROMPT
@@ -31,6 +33,7 @@ class AgentRuntime:
     - call inference service
     - ask Planner to interpret inference responses
     - execute approved tool decisions through the sandbox
+    - record execution steps
     - maintain conversation messages
     - produce an execution result
 
@@ -58,7 +61,9 @@ class AgentRuntime:
         max_steps: int,
     ) -> None:
         if max_steps <= 0:
-            raise ValueError("max_steps must be greater than zero")
+            raise ValueError(
+                "max_steps must be greater than zero"
+            )
 
         self.router = router
         self.inference = inference
@@ -153,8 +158,16 @@ class AgentRuntime:
 
         return self._to_agent_response(
             result=result,
-            steps=int(result.metadata.get("steps", 0)),
-            tool_calls=result.metadata.get("tool_calls", []),
+            steps=int(
+                result.metadata.get(
+                    "steps",
+                    0,
+                )
+            ),
+            tool_calls=result.metadata.get(
+                "tool_calls",
+                [],
+            ),
         )
 
     async def _execute(
@@ -166,6 +179,22 @@ class AgentRuntime:
         task: str,
         required_capabilities: list[str] | None,
     ) -> ExecutionResult:
+        # ---------------------------------------------------------
+        # STEP: PLAN
+        # ---------------------------------------------------------
+
+        plan_step = self._start_step(
+            context=context,
+            step_type=StepType.PLAN,
+            input={
+                "intent": intent,
+                "task": task,
+                "required_capabilities": (
+                    required_capabilities or []
+                ),
+            },
+        )
+
         context.add_message(
             {
                 "role": "system",
@@ -207,6 +236,14 @@ class AgentRuntime:
             }
         )
 
+        plan_step.mark_completed(
+            output={
+                "model": decision.model,
+                "provider": decision.provider,
+                "tool_count": len(tool_definitions),
+            }
+        )
+
         logger.info(
             "agent_model_selected "
             "execution_id=%s model=%s provider=%s",
@@ -217,7 +254,10 @@ class AgentRuntime:
 
         executed_tools: list[ToolCallResult] = []
 
-        for step in range(1, self.max_steps + 1):
+        for step in range(
+            1,
+            self.max_steps + 1,
+        ):
             context.current_step = step
 
             logger.info(
@@ -228,24 +268,70 @@ class AgentRuntime:
                 selected_model,
             )
 
-            response = await self.inference.complete(
-                model=selected_model,
-                messages=context.messages,
-                tools=tool_definitions,
+            # -----------------------------------------------------
+            # STEP: INFERENCE
+            # -----------------------------------------------------
+
+            inference_step = self._start_step(
+                context=context,
+                step_type=StepType.INFERENCE,
+                input={
+                    "model": selected_model,
+                    "messages": list(
+                        context.messages
+                    ),
+                    "tools": tool_definitions,
+                },
             )
+
+            try:
+                response = await self.inference.complete(
+                    model=selected_model,
+                    messages=context.messages,
+                    tools=tool_definitions,
+                )
+            except Exception as exc:
+                inference_step.mark_failed(
+                    error=str(exc),
+                )
+                raise
+            else:
+                inference_step.mark_completed(
+                    output=response,
+                )
 
             decision = self.planner.plan(
                 response=response,
                 context=context,
             )
 
+            # -----------------------------------------------------
+            # STEP: FINAL
+            # -----------------------------------------------------
+
             if decision.is_final:
+                final_step = self._start_step(
+                    context=context,
+                    step_type=StepType.FINAL,
+                    input={
+                        "content": decision.content,
+                    },
+                )
+
+                final_step.mark_completed(
+                    output=decision.content,
+                )
+
                 return self._complete_execution(
                     context=context,
                     output=decision.content,
                     step=step,
                     executed_tools=executed_tools,
                 )
+
+            # -----------------------------------------------------
+            # STEP: TOOL CALL
+            # -----------------------------------------------------
 
             if decision.is_tool_call:
                 assert decision.tool_name is not None
@@ -255,11 +341,15 @@ class AgentRuntime:
                 arguments = decision.arguments
                 call_id = decision.call_id
 
-                assistant_message = self._extract_assistant_message(
-                    response
+                assistant_message = (
+                    self._extract_assistant_message(
+                        response
+                    )
                 )
 
-                context.add_message(assistant_message)
+                context.add_message(
+                    assistant_message
+                )
 
                 context.add_tool_call(
                     {
@@ -270,6 +360,16 @@ class AgentRuntime:
                     }
                 )
 
+                tool_step = self._start_step(
+                    context=context,
+                    step_type=StepType.TOOL_CALL,
+                    input={
+                        "name": tool_name,
+                        "arguments": arguments,
+                        "call_id": call_id,
+                    },
+                )
+
                 logger.info(
                     "agent_tool_execution_started "
                     "execution_id=%s step=%s tool=%s",
@@ -278,9 +378,36 @@ class AgentRuntime:
                     tool_name,
                 )
 
-                result = await self.sandbox.execute(
-                    tool_name,
-                    arguments,
+                try:
+                    result = await self.sandbox.execute(
+                        tool_name,
+                        arguments,
+                    )
+                except Exception as exc:
+                    tool_step.mark_failed(
+                        error=str(exc),
+                    )
+                    raise
+                else:
+                    tool_step.mark_completed(
+                        output=result,
+                    )
+
+                # -------------------------------------------------
+                # STEP: TOOL RESULT
+                # -------------------------------------------------
+
+                tool_result_step = self._start_step(
+                    context=context,
+                    step_type=StepType.TOOL_RESULT,
+                    input={
+                        "tool_call_id": call_id,
+                        "tool_name": tool_name,
+                    },
+                )
+
+                tool_result_step.mark_completed(
+                    output=result,
                 )
 
                 executed_tools.append(
@@ -291,8 +418,28 @@ class AgentRuntime:
                     )
                 )
 
-                context.add_observation(
+                # -------------------------------------------------
+                # STEP: OBSERVATION
+                # -------------------------------------------------
+
+                observation = (
                     f"Tool '{tool_name}' returned: {result}"
+                )
+
+                context.add_observation(
+                    observation
+                )
+
+                observation_step = self._start_step(
+                    context=context,
+                    step_type=StepType.OBSERVATION,
+                    input={
+                        "tool_name": tool_name,
+                    },
+                )
+
+                observation_step.mark_completed(
+                    output=observation,
                 )
 
                 context.add_message(
@@ -315,12 +462,41 @@ class AgentRuntime:
                 continue
 
             raise RuntimeError(
-                f"Unsupported agent decision type: {decision.type}"
+                "Unsupported agent decision type: "
+                f"{decision.type}"
             )
 
         raise AgentMaxStepsError(
-            f"Agent exceeded maximum steps: {self.max_steps}"
+            "Agent exceeded maximum steps: "
+            f"{self.max_steps}"
         )
+
+    @staticmethod
+    def _start_step(
+        *,
+        context: ExecutionContext,
+        step_type: StepType,
+        input: Any = None,
+    ) -> Step:
+        """
+        Create, start, and attach a Step to the current execution.
+        """
+
+        step = Step(
+            number=len(
+                context.execution.steps
+            ) + 1,
+            type=step_type,
+            input=input,
+        )
+
+        step.mark_started()
+
+        context.execution.add_step(
+            step
+        )
+
+        return step
 
     @staticmethod
     def _extract_assistant_message(
@@ -334,25 +510,41 @@ class AgentRuntime:
         All protocol validation belongs to Planner.
         """
 
-        choices = response.get("choices")
+        choices = response.get(
+            "choices"
+        )
 
-        if not isinstance(choices, list) or not choices:
+        if (
+            not isinstance(choices, list)
+            or not choices
+        ):
             raise RuntimeError(
-                "Planner accepted an inference response without choices"
+                "Planner accepted an inference response "
+                "without choices"
             )
 
         choice = choices[0]
 
-        if not isinstance(choice, dict):
+        if not isinstance(
+            choice,
+            dict,
+        ):
             raise RuntimeError(
-                "Planner accepted an invalid inference choice"
+                "Planner accepted an invalid "
+                "inference choice"
             )
 
-        message = choice.get("message")
+        message = choice.get(
+            "message"
+        )
 
-        if not isinstance(message, dict):
+        if not isinstance(
+            message,
+            dict,
+        ):
             raise RuntimeError(
-                "Planner accepted an inference response without message"
+                "Planner accepted an inference response "
+                "without message"
             )
 
         return message
@@ -365,22 +557,30 @@ class AgentRuntime:
         step: int,
         executed_tools: list[ToolCallResult],
     ) -> ExecutionResult:
-        if not isinstance(output, str):
+        if not isinstance(
+            output,
+            str,
+        ):
             raise RuntimeError(
-                "Planner produced a final decision without string content"
+                "Planner produced a final decision "
+                "without string content"
             )
 
         context.metadata.update(
             {
                 "steps": step,
-                "tool_calls": list(executed_tools),
+                "tool_calls": list(
+                    executed_tools
+                ),
             }
         )
 
         context.execution.metadata.update(
             {
                 "steps": step,
-                "tool_calls": list(executed_tools),
+                "tool_calls": list(
+                    executed_tools
+                ),
             }
         )
 
@@ -398,17 +598,23 @@ class AgentRuntime:
     ) -> AgentResponse:
         if result.status is not ExecutionStatus.COMPLETED:
             raise RuntimeError(
-                "Cannot create successful AgentResponse from "
-                f"execution with status '{result.status}'"
+                "Cannot create successful AgentResponse "
+                "from execution with status "
+                f"'{result.status}'"
             )
 
-        if not isinstance(result.output, str):
+        if not isinstance(
+            result.output,
+            str,
+        ):
             raise RuntimeError(
                 "Execution completed without string output"
             )
 
         return AgentResponse(
-            execution_id=str(result.execution_id),
+            execution_id=str(
+                result.execution_id
+            ),
             status="success",
             answer=result.output,
             steps=steps,
