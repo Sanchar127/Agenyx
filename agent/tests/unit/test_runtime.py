@@ -4,6 +4,10 @@ from typing import Any
 
 import pytest
 
+from app.agent_runtime.domain import (
+    AgentDecision,
+    DecisionType,
+)
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.runtime import AgentRuntime
 from app.core.errors import (
@@ -84,7 +88,9 @@ class FakeToolSandbox(ToolSandboxClient):
 
     def __init__(self) -> None:
         self.tools = create_tool_registry()
-        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.calls: list[
+            tuple[str, dict[str, Any]]
+        ] = []
 
     async def execute(
         self,
@@ -102,6 +108,43 @@ class FakeToolSandbox(ToolSandboxClient):
             name,
             arguments,
         )
+
+
+class FakePlanner:
+    """
+    In-memory Planner used to test Runtime decision handling.
+
+    The real Planner is responsible for interpreting inference
+    responses. These tests focus specifically on whether Runtime
+    correctly handles each AgentDecision.
+    """
+
+    def __init__(
+        self,
+        decisions: list[AgentDecision],
+    ) -> None:
+        self.decisions = decisions
+        self.calls: list[dict[str, Any]] = []
+
+    def plan(
+        self,
+        *,
+        response: dict[str, Any],
+        context: Any,
+    ) -> AgentDecision:
+        self.calls.append(
+            {
+                "response": response,
+                "context": context,
+            }
+        )
+
+        if not self.decisions:
+            raise AssertionError(
+                "FakePlanner has no decisions left"
+            )
+
+        return self.decisions.pop(0)
 
 
 def create_runtime(
@@ -141,7 +184,12 @@ def create_runtime(
         planner=planner,
     )
 
-    return runtime, inference, router, sandbox
+    return (
+        runtime,
+        inference,
+        router,
+        sandbox,
+    )
 
 
 def tool_call_response(
@@ -554,10 +602,17 @@ async def test_agent_records_multiple_tool_calls() -> None:
 
     assert len(sandbox.calls) == 2
 
-    assert result.tool_calls[0].call_id if hasattr(
-        result.tool_calls[0],
-        "call_id",
-    ) else True
+    assert result.tool_calls[0].name == "calculator"
+    assert result.tool_calls[0].arguments == {
+        "expression": "10 + 5",
+    }
+    assert result.tool_calls[0].result == "15"
+
+    assert result.tool_calls[1].name == "calculator"
+    assert result.tool_calls[1].arguments == {
+        "expression": "15 * 2",
+    }
+    assert result.tool_calls[1].result == "30"
 
 
 @pytest.mark.asyncio
@@ -577,6 +632,189 @@ async def test_agent_does_not_execute_unknown_tool() -> None:
     ):
         await runtime.run(
             "Delete all files",
+        )
+
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_continues_when_planner_returns_continue() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            final_response("Intermediate response."),
+            final_response("Final response."),
+        ]
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.CONTINUE,
+            ),
+            AgentDecision(
+                type=DecisionType.FINAL,
+                content="Continued successfully.",
+            ),
+        ]
+    )
+
+    result = await runtime.run(
+        "Continue this task",
+    )
+
+    assert result.status == "success"
+    assert result.answer == "Continued successfully."
+
+    assert len(inference.calls) == 2
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_fails_when_planner_returns_fail() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            final_response("Failure response."),
+        ]
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.FAIL,
+                error="The agent cannot safely continue.",
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="The agent cannot safely continue",
+    ):
+        await runtime.run(
+            "Do something unsafe",
+        )
+
+    assert len(inference.calls) == 1
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_fail_uses_default_error_when_missing() -> None:
+    runtime, _, _, sandbox = create_runtime(
+        [
+            final_response("Failure response."),
+        ]
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.FAIL,
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Agent returned a failure decision",
+    ):
+        await runtime.run(
+            "Fail this task",
+        )
+
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_continue_still_respects_max_steps() -> None:
+    runtime, inference, _, sandbox = create_runtime(
+        [
+            final_response("Intermediate 1"),
+            final_response("Intermediate 2"),
+            final_response("Intermediate 3"),
+        ],
+        max_steps=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.CONTINUE,
+            ),
+            AgentDecision(
+                type=DecisionType.CONTINUE,
+            ),
+            AgentDecision(
+                type=DecisionType.CONTINUE,
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        AgentMaxStepsError,
+        match="maximum steps",
+    ):
+        await runtime.run(
+            "Keep going",
+        )
+
+    assert len(inference.calls) == 3
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_continue_does_not_execute_tools() -> None:
+    runtime, _, _, sandbox = create_runtime(
+        [
+            final_response("Continue."),
+            final_response("Done."),
+        ]
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.CONTINUE,
+            ),
+            AgentDecision(
+                type=DecisionType.FINAL,
+                content="Done.",
+            ),
+        ]
+    )
+
+    result = await runtime.run(
+        "Continue without tools",
+    )
+
+    assert result.status == "success"
+    assert result.answer == "Done."
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_decision_fail_does_not_execute_tools() -> None:
+    runtime, _, _, sandbox = create_runtime(
+        [
+            final_response("Stop."),
+        ]
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.FAIL,
+                error="Execution must stop.",
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Execution must stop",
+    ):
+        await runtime.run(
+            "Stop this execution",
         )
 
     assert sandbox.calls == []

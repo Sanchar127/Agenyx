@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent_runtime.domain import (
+    AgentDecision,
+    DecisionType,
     Execution,
     ExecutionContext,
     ExecutionResult,
@@ -50,7 +52,7 @@ class AgentRuntime:
     - HTTP gateway concerns
     - persistence
 
-    Execution lifecycle is controlled explicitly through ExecutionState:
+    Execution lifecycle:
 
         CREATED
            |
@@ -68,6 +70,22 @@ class AgentRuntime:
         |
         v
     INFERENCE
+
+    Decision handling:
+
+        FINAL
+          -> COMPLETED
+
+        TOOL_CALL
+          -> TOOL_EXECUTION
+          -> OBSERVING
+          -> INFERENCE
+
+        CONTINUE
+          -> INFERENCE
+
+        FAIL
+          -> FAILED
 
     Any active state may transition to FAILED or CANCELLED.
     """
@@ -105,7 +123,7 @@ class AgentRuntime:
         """
         Run one complete agent execution.
 
-        The Runtime is responsible for driving the execution lifecycle.
+        Runtime owns the top-level execution lifecycle.
 
         Initial transition:
 
@@ -201,6 +219,8 @@ class AgentRuntime:
             ExecutionState.COMPLETED
         )
 
+        # Rebuild the result after the lifecycle transition so the
+        # returned result contains the authoritative COMPLETED state.
         result = ExecutionResult.from_execution(
             execution,
             output=result.output,
@@ -577,6 +597,68 @@ class AgentRuntime:
                 #
                 # before calling the inference service again.
                 continue
+
+            # -----------------------------------------------------
+            # CONTINUE
+            # -----------------------------------------------------
+            #
+            # CONTINUE means that the Planner has determined that
+            # the agent should perform another inference iteration.
+            #
+            # We deliberately do NOT transition through PLANNING or
+            # OBSERVING here.
+            #
+            # The execution is already in INFERENCE, therefore the
+            # next loop iteration simply performs another inference.
+            #
+            # max_steps remains the hard safety boundary.
+            # -----------------------------------------------------
+
+            if decision.is_continue:
+                logger.info(
+                    "agent_decision_continue "
+                    "execution_id=%s step=%s state=%s",
+                    execution.id,
+                    step,
+                    execution.state,
+                )
+
+                continue
+
+            # -----------------------------------------------------
+            # FAIL
+            # -----------------------------------------------------
+            #
+            # FAIL is an explicit decision from the Planner telling
+            # the Runtime that execution cannot continue.
+            #
+            # Runtime raises an exception here instead of directly
+            # changing the execution state.
+            #
+            # The top-level run() method owns:
+            #
+            #       ACTIVE -> FAILED
+            #
+            # This keeps failure lifecycle management centralized.
+            # -----------------------------------------------------
+
+            if decision.is_failure:
+                error = (
+                    decision.error
+                    or "Agent returned a failure decision"
+                )
+
+                logger.error(
+                    "agent_decision_failure "
+                    "execution_id=%s step=%s error=%s",
+                    execution.id,
+                    step,
+                    error,
+                )
+
+                raise RuntimeError(
+                    error
+                )
 
             # -----------------------------------------------------
             # UNKNOWN DECISION
