@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
-from app.agent_runtime.domain import (
-    Execution,
-    ExecutionResult,
-    ExecutionStatus,
-)
 from app.agent_runtime.prompts import SYSTEM_PROMPT
 from app.core.errors import (
     AgentMaxStepsError,
@@ -26,23 +22,20 @@ class AgentRuntime:
     Agent orchestration layer.
 
     Responsibilities:
-    - create and manage an agent execution
     - maintain the reasoning loop
     - ask semantic router for model selection
     - call inference service
     - process model tool calls
     - send tool execution to sandbox
     - maintain conversation messages
-    - produce an execution result
 
     Not responsible for:
     - model inference
-    - model/provider implementation
+    - model/provider selection logic
     - tool implementation
     - tool isolation
     - HTTP gateway concerns
     - persistence
-    - lifecycle transition policy
     """
 
     def __init__(
@@ -54,9 +47,6 @@ class AgentRuntime:
         sandbox: ToolSandboxClient,
         max_steps: int,
     ) -> None:
-        if max_steps <= 0:
-            raise ValueError("max_steps must be greater than zero")
-
         self.router = router
         self.inference = inference
         self.tools = tools
@@ -72,84 +62,20 @@ class AgentRuntime:
         required_capabilities: list[str] | None = None,
     ) -> AgentResponse:
 
-        execution = Execution()
+        execution_id = str(uuid.uuid4())
 
         if not session_id:
-            session_id = str(execution.id)
+            session_id = execution_id
 
         if not task:
             task = intent
 
-        execution.metadata.update(
-            {
-                "session_id": session_id,
-                "task": task,
-            }
-        )
-
         logger.info(
             "agent_execution_started "
             "execution_id=%s session_id=%s",
-            execution.id,
+            execution_id,
             session_id,
         )
-
-        execution.mark_started()
-
-        try:
-            result = await self._execute(
-                execution=execution,
-                intent=intent,
-                session_id=session_id,
-                task=task,
-                required_capabilities=required_capabilities,
-            )
-
-        except Exception as exc:
-            execution.mark_failed(
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
-
-            logger.exception(
-                "agent_execution_failed "
-                "execution_id=%s error_type=%s",
-                execution.id,
-                type(exc).__name__,
-            )
-
-            raise
-
-        execution.mark_completed()
-
-        result = ExecutionResult.from_execution(
-            execution,
-            output=result.output,
-        )
-
-        logger.info(
-            "agent_execution_completed "
-            "execution_id=%s status=%s duration_seconds=%s",
-            result.execution_id,
-            result.status,
-            result.duration_seconds,
-        )
-
-        return self._to_agent_response(
-            result=result,
-            steps=int(result.metadata.get("steps", 0)),
-            tool_calls=result.metadata.get("tool_calls", []),
-        )
-
-    async def _execute(
-        self,
-        *,
-        execution: Execution,
-        intent: str,
-        session_id: str,
-        task: str,
-        required_capabilities: list[str] | None,
-    ) -> ExecutionResult:
 
         messages: list[dict[str, Any]] = [
             {
@@ -173,13 +99,10 @@ class AgentRuntime:
 
         selected_model = decision.model
 
-        execution.metadata["model"] = decision.model
-        execution.metadata["provider"] = decision.provider
-
         logger.info(
             "agent_model_selected "
             "execution_id=%s model=%s provider=%s",
-            execution.id,
+            execution_id,
             decision.model,
             decision.provider,
         )
@@ -191,7 +114,7 @@ class AgentRuntime:
             logger.info(
                 "agent_step_started "
                 "execution_id=%s step=%s model=%s",
-                execution.id,
+                execution_id,
                 step,
                 selected_model,
             )
@@ -218,6 +141,7 @@ class AgentRuntime:
                     "Inference tool_calls must be a list"
                 )
 
+            # Final model response.
             if not tool_calls:
 
                 content = message.get("content")
@@ -228,16 +152,23 @@ class AgentRuntime:
                         "tool calls nor content"
                     )
 
-                execution.metadata["steps"] = step
-                execution.metadata["tool_calls"] = list(
-                    executed_tools
+                logger.info(
+                    "agent_execution_completed "
+                    "execution_id=%s steps=%s tools=%s",
+                    execution_id,
+                    step,
+                    len(executed_tools),
                 )
 
-                return ExecutionResult.from_execution(
-                    execution,
-                    output=content,
+                return AgentResponse(
+                    execution_id=execution_id,
+                    status="success",
+                    answer=content,
+                    steps=step,
+                    tool_calls=executed_tools,
                 )
 
+            # Preserve assistant tool-call message.
             messages.append(message)
 
             for tool_call in tool_calls:
@@ -249,7 +180,7 @@ class AgentRuntime:
                 logger.info(
                     "agent_tool_execution_started "
                     "execution_id=%s step=%s tool=%s",
-                    execution.id,
+                    execution_id,
                     step,
                     name,
                 )
@@ -279,40 +210,13 @@ class AgentRuntime:
                 logger.info(
                     "agent_tool_execution_completed "
                     "execution_id=%s step=%s tool=%s",
-                    execution.id,
+                    execution_id,
                     step,
                     name,
                 )
 
         raise AgentMaxStepsError(
             f"Agent exceeded maximum steps: {self.max_steps}"
-        )
-
-    @staticmethod
-    def _to_agent_response(
-        *,
-        result: ExecutionResult,
-        steps: int,
-        tool_calls: list[ToolCallResult],
-    ) -> AgentResponse:
-
-        if result.status is not ExecutionStatus.COMPLETED:
-            raise RuntimeError(
-                "Cannot create successful AgentResponse from "
-                f"execution with status '{result.status}'"
-            )
-
-        if not isinstance(result.output, str):
-            raise RuntimeError(
-                "Execution completed without string output"
-            )
-
-        return AgentResponse(
-            execution_id=str(result.execution_id),
-            status="success",
-            answer=result.output,
-            steps=steps,
-            tool_calls=tool_calls,
         )
 
     @staticmethod

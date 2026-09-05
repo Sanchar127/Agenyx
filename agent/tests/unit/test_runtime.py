@@ -1,5 +1,6 @@
-
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -9,9 +10,72 @@ from app.core.errors import (
     AgentProtocolError,
     ToolExecutionError,
 )
-from app.llm.fake import FakeLLMProvider
+from app.router.client import SemanticRouterClient
 from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
+
+
+class FakeInference:
+    """In-memory fake for the InferenceClient boundary."""
+
+    def __init__(
+        self,
+        responses: list[dict[str, Any]],
+    ) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+            }
+        )
+
+        if not self.responses:
+            raise AssertionError(
+                "FakeInference has no responses left"
+            )
+
+        return self.responses.pop(0)
+
+
+class FakeRouter:
+    """In-memory fake for semantic model routing."""
+
+    class Decision:
+        model = "test-model"
+        provider = "test-provider"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def route(
+        self,
+        *,
+        session_id: str,
+        task: str,
+        messages: list[dict[str, Any]],
+        required_capabilities: list[str] | None = None,
+    ) -> Decision:
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "task": task,
+                "messages": messages,
+                "required_capabilities": required_capabilities,
+            }
+        )
+
+        return self.Decision()
 
 
 class FakeToolSandbox(ToolSandboxClient):
@@ -40,20 +104,28 @@ class FakeToolSandbox(ToolSandboxClient):
 
 
 def create_runtime(
-    llm: FakeLLMProvider,
+    responses: list[dict[str, Any]],
     *,
     max_steps: int = 8,
-) -> tuple[AgentRuntime, FakeToolSandbox]:
+) -> tuple[
+    AgentRuntime,
+    FakeInference,
+    FakeRouter,
+    FakeToolSandbox,
+]:
+    inference = FakeInference(responses)
+    router = FakeRouter()
     sandbox = FakeToolSandbox()
 
     runtime = AgentRuntime(
-        llm=llm,
+        router=router,
+        inference=inference,
         tools=create_tool_registry(),
         max_steps=max_steps,
         sandbox=sandbox,
     )
 
-    return runtime, sandbox
+    return runtime, inference, router, sandbox
 
 
 def tool_call_response(
@@ -98,13 +170,11 @@ def final_response(answer: str) -> dict:
 
 @pytest.mark.asyncio
 async def test_agent_returns_final_answer() -> None:
-    llm = FakeLLMProvider(
+    runtime, inference, router, sandbox = create_runtime(
         [
             final_response("Hello!"),
         ]
     )
-
-    runtime, sandbox = create_runtime(llm)
 
     result = await runtime.run("Say hello")
 
@@ -114,10 +184,16 @@ async def test_agent_returns_final_answer() -> None:
     assert result.tool_calls == []
     assert sandbox.calls == []
 
+    assert len(router.calls) == 1
+    assert router.calls[0]["task"] == "Say hello"
+
+    assert len(inference.calls) == 1
+    assert inference.calls[0]["model"] == "test-model"
+
 
 @pytest.mark.asyncio
 async def test_agent_executes_tool_through_sandbox() -> None:
-    llm = FakeLLMProvider(
+    runtime, inference, _, sandbox = create_runtime(
         [
             tool_call_response(
                 "calculator",
@@ -128,8 +204,6 @@ async def test_agent_executes_tool_through_sandbox() -> None:
             ),
         ]
     )
-
-    runtime, sandbox = create_runtime(llm)
 
     result = await runtime.run(
         "What is 25 * 17?"
@@ -150,10 +224,12 @@ async def test_agent_executes_tool_through_sandbox() -> None:
         )
     ]
 
+    assert len(inference.calls) == 2
+
 
 @pytest.mark.asyncio
 async def test_agent_supports_multiple_steps() -> None:
-    llm = FakeLLMProvider(
+    runtime, _, _, sandbox = create_runtime(
         [
             tool_call_response(
                 "calculator",
@@ -170,8 +246,6 @@ async def test_agent_supports_multiple_steps() -> None:
             ),
         ]
     )
-
-    runtime, sandbox = create_runtime(llm)
 
     result = await runtime.run(
         "Calculate 25 * 17 and then add 10."
@@ -201,7 +275,7 @@ async def test_agent_supports_multiple_steps() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_enforces_max_steps() -> None:
-    llm = FakeLLMProvider(
+    runtime, inference, _, sandbox = create_runtime(
         [
             tool_call_response(
                 "calculator",
@@ -209,11 +283,7 @@ async def test_agent_enforces_max_steps() -> None:
                 f"call-{i}",
             )
             for i in range(8)
-        ]
-    )
-
-    runtime, sandbox = create_runtime(
-        llm,
+        ],
         max_steps=3,
     )
 
@@ -223,19 +293,18 @@ async def test_agent_enforces_max_steps() -> None:
         )
 
     assert len(sandbox.calls) == 3
+    assert len(inference.calls) == 3
 
 
 @pytest.mark.asyncio
-async def test_agent_rejects_invalid_llm_response() -> None:
-    llm = FakeLLMProvider(
+async def test_agent_rejects_invalid_inference_response() -> None:
+    runtime, _, _, sandbox = create_runtime(
         [
             {
                 "invalid": "response"
             }
         ]
     )
-
-    runtime, sandbox = create_runtime(llm)
 
     with pytest.raises(AgentProtocolError):
         await runtime.run("Do something")
@@ -245,7 +314,7 @@ async def test_agent_rejects_invalid_llm_response() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_failure_is_not_silently_ignored() -> None:
-    llm = FakeLLMProvider(
+    runtime, _, _, sandbox = create_runtime(
         [
             tool_call_response(
                 "calculator",
@@ -253,8 +322,6 @@ async def test_tool_failure_is_not_silently_ignored() -> None:
             ),
         ]
     )
-
-    runtime, sandbox = create_runtime(llm)
 
     with pytest.raises(ToolExecutionError):
         await runtime.run(
