@@ -10,10 +10,12 @@ from app.agent_runtime.domain import (
 )
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.runtime import AgentRuntime
+from app.core.errors import (
+    AgentMaxStepsError,
+    ExecutionLimitExceeded,
+)
 from app.models.responses import ToolCallResult
 from app.tools.builtin import create_tool_registry
-
-
 class FakeRouter:
     async def route(
         self,
@@ -280,3 +282,158 @@ async def test_tool_failure_is_propagated() -> None:
         await runtime.run(
             "Calculate 2 + 2."
         )
+
+@pytest.mark.asyncio
+async def test_runtime_stops_after_max_steps() -> None:
+    """
+    The runtime must not perform inference beyond max_steps.
+    """
+
+    inference = FakeInference(
+        [
+            calculator_tool_response(
+                expression="2 + 2",
+                call_id="call_1",
+            ),
+            # This response must never be consumed.
+            final_response(
+                "This must never execute."
+            ),
+        ]
+    )
+
+    runtime = create_runtime(
+        inference=inference,
+        max_steps=1,
+    )
+
+    with pytest.raises(
+        AgentMaxStepsError,
+        match="maximum steps",
+    ):
+        await runtime.run(
+            "Keep calculating."
+        )
+
+    # Exactly one inference iteration was permitted.
+    assert inference.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_max_steps_error_is_execution_limit_error() -> None:
+    """
+    AgentMaxStepsError must remain compatible with the
+    higher-level ExecutionLimitExceeded abstraction.
+    """
+
+    inference = FakeInference(
+        [
+            calculator_tool_response(
+                expression="2 + 2",
+                call_id="call_1",
+            )
+        ]
+    )
+
+    runtime = create_runtime(
+        inference=inference,
+        max_steps=1,
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded
+    ) as exc_info:
+        await runtime.run(
+            "Keep calculating."
+        )
+
+    assert isinstance(
+        exc_info.value,
+        AgentMaxStepsError,
+    )
+
+    assert inference.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_max_steps_allows_exactly_configured_iterations() -> None:
+    """
+    max_steps=2 permits exactly two inference iterations,
+    but never starts a third.
+    """
+
+    inference = FakeInference(
+        [
+            # Step 1.
+            calculator_tool_response(
+                expression="2 + 2",
+                call_id="call_1",
+            ),
+            # Step 2.
+            calculator_tool_response(
+                expression="3 + 3",
+                call_id="call_2",
+            ),
+            # Must never be consumed.
+            final_response(
+                "This must never execute."
+            ),
+        ]
+    )
+
+    runtime = create_runtime(
+        inference=inference,
+        max_steps=2,
+    )
+
+    with pytest.raises(
+        AgentMaxStepsError,
+        match="maximum steps",
+    ):
+        await runtime.run(
+            "Keep calculating."
+        )
+
+    # Exactly two inference iterations were permitted.
+    assert inference.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_max_steps_failure_is_recorded_by_runtime() -> None:
+    """
+    When the execution limit is exceeded, AgentRuntime must
+    record the failure before propagating the exception.
+
+    The current public API raises the exception instead of
+    returning the internal Execution object, so this test verifies
+    the externally observable failure contract.
+    """
+
+    inference = FakeInference(
+        [
+            calculator_tool_response(
+                expression="2 + 2",
+                call_id="call_1",
+            )
+        ]
+    )
+
+    runtime = create_runtime(
+        inference=inference,
+        max_steps=1,
+    )
+
+    with pytest.raises(
+        AgentMaxStepsError
+    ) as exc_info:
+        await runtime.run(
+            "Keep calculating."
+        )
+
+    assert (
+        "maximum steps"
+        in str(exc_info.value).lower()
+    )
+
+    # No second inference was started.
+    assert inference.calls == 1

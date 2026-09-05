@@ -79,6 +79,8 @@ async def test_executor_returns_successful_tool_result() -> None:
     assert result.duration_seconds is not None
     assert result.duration_seconds >= 0
 
+    assert result.metadata["tool_name"] == "echo"
+
     assert sandbox.calls == [
         ("echo", {"value": "hello"}),
     ]
@@ -106,6 +108,10 @@ async def test_executor_handles_sandbox_failure() -> None:
     assert result.output is None
     assert result.error is not None
     assert "sandbox execution failed" in result.error.lower()
+
+    assert result.metadata["error_type"] == "RuntimeError"
+    assert result.metadata["tool_name"] == "echo"
+
     assert result.duration_seconds is not None
     assert result.duration_seconds >= 0
 
@@ -134,6 +140,10 @@ async def test_executor_handles_unknown_tool() -> None:
     assert result.output is None
     assert result.error is not None
     assert "unknown tool" in result.error.lower()
+
+    assert result.metadata["error_type"] == "unknown_tool"
+    assert result.metadata["tool_name"] == "does_not_exist"
+
     assert result.duration_seconds is not None
     assert result.duration_seconds >= 0
 
