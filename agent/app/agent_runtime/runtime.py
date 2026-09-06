@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -29,6 +28,9 @@ from app.agent_runtime.domain import (
     StepType,
     ToolCall,
 )
+from app.agent_runtime.event_stream import EventStream
+from app.agent_runtime.event_types import AgentEventType
+from app.agent_runtime.events import AgentEvent
 from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.prompts import SYSTEM_PROMPT
@@ -57,11 +59,13 @@ class _ActiveExecution:
     Runtime-owned information for an execution that is currently
     running.
 
-    Each execution gets its own cancellation token and asyncio task.
+    Each execution gets its own cancellation token, asyncio task,
+    and event stream.
     """
 
     token: CancellationToken
     task: asyncio.Task[Any] | None = None
+    event_stream: EventStream | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +101,7 @@ class AgentRuntime:
     - feed tool observations back into inference
     - enforce execution limits
     - support explicit execution cancellation
+    - emit runtime execution events
     - produce the public AgentResponse
 
     Provider/model-specific logic does not belong here.
@@ -192,6 +197,18 @@ class AgentRuntime:
         - Cancellation cancels all active sibling calls.
         - Results are applied to ExecutionContext in original model
           order.
+
+    Event streaming semantics:
+
+        - Every execution receives its own EventStream.
+        - Runtime events are published through _publish_event().
+        - Event-stream failures never fail agent execution.
+        - Terminal execution events are emitted before the stream
+          is closed.
+        - Raw inference responses and raw tool outputs are not
+          exposed through runtime events.
+        - Parallel tool events represent actual execution timing,
+          not deterministic model ordering.
     """
 
     def __init__(
@@ -290,6 +307,7 @@ class AgentRuntime:
         # ---------------------------------------------------------
 
         self.approval_policy = approval_policy
+
         self.approval_manager = (
             approval_manager
             if approval_manager is not None
@@ -319,6 +337,24 @@ class AgentRuntime:
     ) -> AgentResponse:
         """
         Execute an agent request from start to finish.
+
+        Runtime event lifecycle:
+
+            create execution
+                ↓
+            create EventStream
+                ↓
+            register active execution
+                ↓
+            EXECUTION_STARTED
+                ↓
+            execute
+                ↓
+            terminal execution event
+                ↓
+            close EventStream
+                ↓
+            remove active execution
         """
 
         execution = Execution()
@@ -344,12 +380,19 @@ class AgentRuntime:
         context.metadata["session_id"] = (
             resolved_session_id
         )
+
         context.metadata["task"] = resolved_task
 
+        # ---------------------------------------------------------
+        # Runtime cancellation + event stream.
+        # ---------------------------------------------------------
+
         cancellation = CancellationToken()
+        event_stream = EventStream()
 
         active_execution = _ActiveExecution(
             token=cancellation,
+            event_stream=event_stream,
         )
 
         execution_id = str(execution.id)
@@ -357,6 +400,19 @@ class AgentRuntime:
         self._active_executions[
             execution_id
         ] = active_execution
+
+        # ---------------------------------------------------------
+        # The execution is now visible through get_event_stream().
+        # Emit the first event only after registration.
+        # ---------------------------------------------------------
+
+        await self._publish_event(
+            execution_id=execution_id,
+            event_type=AgentEventType.EXECUTION_STARTED,
+            data={
+                "session_id": resolved_session_id,
+            },
+        )
 
         current_task = asyncio.current_task()
 
@@ -392,6 +448,21 @@ class AgentRuntime:
                 output=output,
             )
 
+            # -----------------------------------------------------
+            # Terminal success event.
+            #
+            # Deliberately does not contain the final answer.
+            # -----------------------------------------------------
+
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.EXECUTION_COMPLETED,
+                data={
+                "status": "success",
+                "steps": len(execution.steps),
+            },
+            )
+
             return self._to_agent_response(
                 result=result,
                 execution=execution,
@@ -409,6 +480,14 @@ class AgentRuntime:
                 execution.transition_to(
                     ExecutionState.CANCELLED
                 )
+
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.EXECUTION_CANCELLED,
+                data={
+                    "reason": "execution_cancelled",
+                },
+            )
 
             logger.info(
                 "Agent execution cancelled",
@@ -445,6 +524,14 @@ class AgentRuntime:
                     ExecutionState.CANCELLED
                 )
 
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.EXECUTION_CANCELLED,
+                data={
+                    "reason": "task_cancelled",
+                },
+            )
+
             logger.info(
                 "Agent execution task cancelled",
                 extra={
@@ -477,6 +564,15 @@ class AgentRuntime:
 
             context.add_error(str(exc))
 
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.EXECUTION_FAILED,
+                data={
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+
             logger.exception(
                 "Agent execution failed",
                 extra={
@@ -488,10 +584,96 @@ class AgentRuntime:
             raise
 
         finally:
+            # -----------------------------------------------------
+            # IMPORTANT:
+            #
+            # Close the stream before removing the execution.
+            #
+            # This guarantees:
+            #
+            # terminal event
+            #       ↓
+            # close sentinel
+            #       ↓
+            # execution removed
+            # -----------------------------------------------------
+
+            active = self._active_executions.get(
+                execution_id
+            )
+
+            if (
+                active is not None
+                and active.event_stream is not None
+            ):
+                await active.event_stream.close()
+
             self._active_executions.pop(
                 execution_id,
                 None,
             )
+
+    async def _publish_event(
+        self,
+        *,
+        execution_id: str,
+        event_type: AgentEventType,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Publish an execution event without allowing streaming failures
+        to affect the agent execution itself.
+
+        Event streaming is an output/observability concern. It must
+        never become part of execution correctness.
+        """
+
+        active = self._active_executions.get(
+            execution_id
+        )
+
+        if (
+            active is None
+            or active.event_stream is None
+        ):
+            return
+
+        try:
+            await active.event_stream.publish(
+                AgentEvent(
+                    type=event_type.value,
+                    execution_id=execution_id,
+                    data=data or {},
+                )
+            )
+
+        except RuntimeError:
+            # A disconnected/closed consumer must never break
+            # the underlying agent execution.
+            logger.debug(
+                "Event stream unavailable for execution %s",
+                execution_id,
+            )
+
+    def get_event_stream(
+        self,
+        execution_id: str,
+    ) -> EventStream | None:
+        """
+        Return the event stream for an active execution.
+
+        The API layer can use this method to obtain the stream
+        without accessing the runtime's internal execution registry.
+        """
+
+        active = self._active_executions.get(
+            execution_id
+        )
+
+        if active is None:
+            return None
+
+        return active.event_stream
 
     async def cancel(
         self,
@@ -589,6 +771,8 @@ class AgentRuntime:
         """
 
         execution_started_at = time.monotonic()
+
+        execution_id = str(execution.id)
 
         repeated_tool_calls: dict[
             tuple[str, str],
@@ -710,7 +894,7 @@ class AgentRuntime:
         logger.info(
             "Agent request routed",
             extra={
-                "execution_id": str(execution.id),
+                "execution_id": execution_id,
                 "session_id": session_id,
                 "model": selected_model,
                 "provider": route.provider,
@@ -789,6 +973,19 @@ class AgentRuntime:
                     + remaining_timeout
                 )
 
+                # -------------------------------------------------
+                # Runtime event: inference started.
+                # -------------------------------------------------
+
+                await self._publish_event(
+                    execution_id=execution_id,
+                    event_type=AgentEventType.INFERENCE_STARTED,
+                    data={
+                        "step": step_number,
+                        "model": selected_model,
+                    },
+                )
+
                 inference_response = (
                     await asyncio.wait_for(
                         self.inference.complete(
@@ -810,6 +1007,21 @@ class AgentRuntime:
                 )
 
                 inference_step.mark_completed()
+
+                # -------------------------------------------------
+                # Runtime event: inference completed.
+                #
+                # Raw LLM response intentionally excluded.
+                # -------------------------------------------------
+
+                await self._publish_event(
+                    execution_id=execution_id,
+                    event_type=AgentEventType.INFERENCE_COMPLETED,
+                    data={
+                        "step": step_number,
+                        "model": selected_model,
+                    },
+                )
 
             except asyncio.TimeoutError as exc:
                 error = (
@@ -876,9 +1088,7 @@ class AgentRuntime:
             logger.debug(
                 "Agent planner decision",
                 extra={
-                    "execution_id": str(
-                        execution.id
-                    ),
+                    "execution_id": execution_id,
                     "step": step_number,
                     "decision_type": str(
                         decision.type
@@ -921,6 +1131,7 @@ class AgentRuntime:
                 self._check_cancellation(
                     cancellation
                 )
+
                 continue
 
             # =====================================================
@@ -1267,6 +1478,7 @@ class AgentRuntime:
                 )
 
                 output = await self._execute_single_tool(
+                    execution=execution,
                     tool_call=tool_call,
                     execution_started_at=(
                         execution_started_at
@@ -1369,6 +1581,7 @@ class AgentRuntime:
                 ordered_results.append(
                     result
                 )
+
                 continue
 
             if isinstance(
@@ -1381,6 +1594,7 @@ class AgentRuntime:
                 ordered_results.append(
                     result
                 )
+
                 continue
 
             raise RuntimeError(
@@ -1575,9 +1789,6 @@ class AgentRuntime:
 
         # ---------------------------------------------------------
         # Wait for all approval decisions.
-        #
-        # Each approval is independent, but the batch cannot execute
-        # until every required approval is resolved.
         # ---------------------------------------------------------
 
         async def wait_for_approval(
@@ -1641,8 +1852,6 @@ class AgentRuntime:
                         f"(call_id={request.call_id})"
                     )
 
-                # Defensive handling in case the manager returns
-                # a still-pending request.
                 await asyncio.sleep(0)
 
         try:
@@ -1680,6 +1889,7 @@ class AgentRuntime:
     async def _execute_single_tool(
         self,
         *,
+        execution: Execution,
         tool_call: ToolCall,
         execution_started_at: float,
         cancellation: CancellationToken,
@@ -1693,9 +1903,14 @@ class AgentRuntime:
         called.
 
         Cancellation is deliberately propagated unchanged.
+
         The parallel batch coordinator owns conversion into the
         Agent domain's ExecutionCancelled error.
         """
+
+        execution_id = str(
+            execution.id
+        )
 
         self._check_cancellation(
             cancellation
@@ -1705,6 +1920,19 @@ class AgentRuntime:
             self._remaining_timeout(
                 execution_started_at
             )
+        )
+
+        # ---------------------------------------------------------
+        # Runtime event: tool started.
+        # ---------------------------------------------------------
+
+        await self._publish_event(
+            execution_id=execution_id,
+            event_type=AgentEventType.TOOL_CALL_STARTED,
+            data={
+                "call_id": tool_call.call_id,
+                "tool_name": tool_call.name,
+            },
         )
 
         try:
@@ -1720,6 +1948,16 @@ class AgentRuntime:
             )
 
         except asyncio.TimeoutError as exc:
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.TOOL_CALL_COMPLETED,
+                data={
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.name,
+                    "success": False,
+                },
+            )
+
             raise ExecutionLimitExceeded(
                 "Agent tool execution exceeded "
                 "execution timeout: "
@@ -1727,6 +1965,21 @@ class AgentRuntime:
             ) from exc
 
         except asyncio.CancelledError:
+            # Cancellation is not a normal tool completion.
+            # The batch coordinator handles cancellation semantics.
+            raise
+
+        except Exception:
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.TOOL_CALL_COMPLETED,
+                data={
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.name,
+                    "success": False,
+                },
+            )
+
             raise
 
         self._check_cancellation(
@@ -1752,6 +2005,21 @@ class AgentRuntime:
                 )
             )
 
+            # -----------------------------------------------------
+            # The tool actually completed, but its result represents
+            # a failure.
+            # -----------------------------------------------------
+
+            await self._publish_event(
+                execution_id=execution_id,
+                event_type=AgentEventType.TOOL_CALL_COMPLETED,
+                data={
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.name,
+                    "success": False,
+                },
+            )
+
             if error_type == "unknown_tool":
                 raise AgentProtocolError(
                     "Unknown tool requested by model: "
@@ -1759,6 +2027,22 @@ class AgentRuntime:
                 )
 
             raise ToolExecutionError(error)
+
+        # ---------------------------------------------------------
+        # Runtime event: successful tool completion.
+        #
+        # Raw tool output intentionally excluded.
+        # ---------------------------------------------------------
+
+        await self._publish_event(
+            execution_id=execution_id,
+            event_type=AgentEventType.TOOL_CALL_COMPLETED,
+            data={
+                "call_id": tool_call.call_id,
+                "tool_name": tool_call.name,
+                "success": True,
+            },
+        )
 
         return tool_result.output
 
@@ -1811,7 +2095,10 @@ class AgentRuntime:
         result_step.output = output
         result_step.mark_completed()
 
+        # ---------------------------------------------------------
         # Execution history.
+        # ---------------------------------------------------------
+
         context_manager.add_tool_call(
             {
                 "id": call_id,
@@ -1837,12 +2124,18 @@ class AgentRuntime:
         observation_step.output = observation
         observation_step.mark_completed()
 
+        # ---------------------------------------------------------
         # Execution history.
+        # ---------------------------------------------------------
+
         context_manager.add_observation(
             observation
         )
 
+        # ---------------------------------------------------------
         # LLM-facing context.
+        # ---------------------------------------------------------
+
         context_manager.add_tool_message(
             call_id=call_id,
             name=tool_name,
