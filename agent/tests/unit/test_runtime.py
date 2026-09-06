@@ -2242,3 +2242,92 @@ async def test_parallel_tool_execution_respects_execution_timeout() -> None:
 
     assert executor.started == 3
     assert executor.cancelled == 3
+
+# ============================================================
+# Asynchronous submission
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_submit_returns_immediately_and_creates_active_execution() -> None:
+    runtime, inference, _, _ = create_runtime(
+        [
+            final_response("done"),
+        ]
+    )
+
+    submission = await runtime.submit("test task")
+
+    assert submission.execution_id
+    assert submission.status == "submitted"
+
+    # The submission API should create the execution immediately.
+    assert runtime.is_active(submission.execution_id)
+
+    # Let the background task finish.
+    await asyncio.sleep(0)
+
+    # The fake inference is fast, so give the task another scheduling
+    # opportunity to complete.
+    await asyncio.sleep(0)
+
+    assert runtime.get_result(submission.execution_id) is not None
+    assert len(inference.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_preserves_completed_execution_result() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("done"),
+        ]
+    )
+
+    submission = await runtime.submit("test task")
+
+    # Wait until the background execution has completed.
+    for _ in range(100):
+        if runtime.get_result(submission.execution_id) is not None:
+            break
+        await asyncio.sleep(0)
+
+    result = runtime.get_result(
+        submission.execution_id
+    )
+
+    assert result is not None
+    assert result.succeeded
+    assert result.execution_id == submission.execution_id
+    assert not runtime.is_active(
+        submission.execution_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_runs_execution_in_background() -> None:
+    runtime, inference, _, _ = create_runtime(
+        [
+            final_response("done"),
+        ]
+    )
+
+    submission = await runtime.submit("background task")
+
+    # submit() should not itself perform the inference synchronously.
+    assert inference.calls == []
+
+    # Give the scheduled task control.
+    await asyncio.sleep(0)
+
+    assert inference.calls
+    assert inference.calls[0]["model"] == "test-model"
+
+    # Ensure the background task is completely finished.
+    for _ in range(100):
+        if runtime.get_result(submission.execution_id) is not None:
+            break
+        await asyncio.sleep(0)
+
+    assert runtime.get_result(
+        submission.execution_id
+    ) is not None
