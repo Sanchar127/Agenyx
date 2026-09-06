@@ -447,14 +447,8 @@ class AgentRuntime:
                 If the execution budget has already expired.
         """
 
-        elapsed = (
-            time.monotonic()
-            - started_at
-        )
-
-        remaining = (
-            self.limits.timeout_seconds
-            - elapsed
+        remaining = self.limits.remaining_timeout(
+            started_at
         )
 
         if remaining <= 0:

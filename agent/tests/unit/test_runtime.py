@@ -4,7 +4,7 @@ import asyncio
 from typing import Any
 
 import pytest
-
+import time
 from app.agent_runtime.cancellation import CancellationToken
 from app.agent_runtime.domain import (
     AgentDecision,
@@ -1386,3 +1386,39 @@ async def test_completed_execution_is_no_longer_active() -> None:
     )
 
     assert cancelled is False
+
+def test_remaining_timeout_uses_execution_budget() -> None:
+    runtime = AgentRuntime.__new__(
+        AgentRuntime
+    )
+
+    runtime.limits = ExecutionLimits(
+        timeout_seconds=10.0,
+    )
+
+    started_at = time.monotonic()
+
+    remaining = runtime._remaining_timeout(
+        started_at
+    )
+
+    assert 0.0 < remaining <= 10.0
+
+def test_remaining_timeout_raises_when_budget_exhausted() -> None:
+    runtime = AgentRuntime.__new__(
+        AgentRuntime
+    )
+
+    runtime.limits = ExecutionLimits(
+        timeout_seconds=1.0,
+    )
+
+    started_at = time.monotonic() - 2.0
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="exceeded timeout",
+    ):
+        runtime._remaining_timeout(
+            started_at
+        )

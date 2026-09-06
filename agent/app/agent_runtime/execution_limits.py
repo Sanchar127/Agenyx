@@ -66,7 +66,10 @@ class ExecutionLimits:
                     "per_tool_limits values cannot be negative"
                 )
 
-    def validate_step(self, step: int) -> None:
+    def validate_step(
+        self,
+        step: int,
+    ) -> None:
         """
         Validate that a step is within the configured limit.
         """
@@ -77,7 +80,10 @@ class ExecutionLimits:
                 f"{self.max_steps}"
             )
 
-    def validate_tool_call(self, tool_calls: int) -> None:
+    def validate_tool_call(
+        self,
+        tool_calls: int,
+    ) -> None:
         """
         Validate that another tool call is permitted.
 
@@ -135,7 +141,10 @@ class ExecutionLimits:
                 f"'{tool_name}': {limit}"
             )
 
-    def validate_timeout(self, started_at: float) -> None:
+    def validate_timeout(
+        self,
+        started_at: float,
+    ) -> None:
         """
         Validate that the execution has not exceeded its time budget.
 
@@ -149,3 +158,86 @@ class ExecutionLimits:
                 "Agent execution exceeded timeout: "
                 f"{self.timeout_seconds} seconds"
             )
+
+    def remaining_steps(
+        self,
+        current_step: int,
+    ) -> int:
+        """
+        Return the number of execution steps remaining.
+
+        A value of zero means the step budget is exhausted.
+        """
+
+        return max(
+            self.max_steps - current_step,
+            0,
+        )
+
+    def remaining_tool_calls(
+        self,
+        tool_calls: int,
+    ) -> int:
+        """
+        Return the number of global tool calls remaining.
+
+        A value of zero means the global tool-call budget
+        is exhausted.
+        """
+
+        return max(
+            self.max_tool_calls - tool_calls,
+            0,
+        )
+
+    def remaining_repeated_tool_calls(
+        self,
+        repeated_calls: int,
+    ) -> int:
+        """
+        Return the number of repeated calls remaining for
+        one identical tool invocation.
+        """
+
+        return max(
+            self.max_repeated_tool_calls - repeated_calls,
+            0,
+        )
+
+    def remaining_per_tool_calls(
+        self,
+        tool_name: str,
+        tool_calls: int,
+    ) -> int | None:
+        """
+        Return the remaining calls for a specific tool.
+
+        Returns None when the tool has no configured limit.
+        """
+
+        limit = self.per_tool_limits.get(tool_name)
+
+        if limit is None:
+            return None
+
+        return max(
+            limit - tool_calls,
+            0,
+        )
+
+    def remaining_timeout(
+        self,
+        started_at: float,
+    ) -> float:
+        """
+        Return the remaining execution time in seconds.
+
+        Returns zero when the execution time budget is exhausted.
+        """
+
+        elapsed = time.monotonic() - started_at
+
+        return max(
+            self.timeout_seconds - elapsed,
+            0.0,
+        )

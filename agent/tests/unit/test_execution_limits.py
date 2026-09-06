@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from app.agent_runtime.execution_limits import ExecutionLimits
@@ -8,7 +10,7 @@ from app.core.errors import (
     ExecutionLimitExceeded,
 )
 
-import time
+
 def test_execution_limits_accept_valid_values() -> None:
     limits = ExecutionLimits(
         max_steps=5,
@@ -80,9 +82,7 @@ def test_step_limit_error_is_execution_limit_error() -> None:
         max_tool_calls=10,
     )
 
-    with pytest.raises(
-        ExecutionLimitExceeded
-    ):
+    with pytest.raises(ExecutionLimitExceeded):
         limits.validate_step(6)
 
 
@@ -110,16 +110,21 @@ def test_tool_limit_rejects_call_at_limit() -> None:
         limits.validate_tool_call(3)
 
 
-
 def test_timeout_allows_execution_before_limit() -> None:
-    limits = ExecutionLimits(timeout_seconds=10.0)
+    limits = ExecutionLimits(
+        timeout_seconds=10.0,
+    )
+
     started_at = time.monotonic()
 
     limits.validate_timeout(started_at)
 
 
 def test_timeout_rejects_expired_execution() -> None:
-    limits = ExecutionLimits(timeout_seconds=1.0)
+    limits = ExecutionLimits(
+        timeout_seconds=1.0,
+    )
+
     started_at = time.monotonic() - 2.0
 
     with pytest.raises(
@@ -134,7 +139,9 @@ def test_timeout_must_be_positive() -> None:
         ValueError,
         match="timeout_seconds",
     ):
-        ExecutionLimits(timeout_seconds=0)
+        ExecutionLimits(
+            timeout_seconds=0,
+        )
 
 
 def test_timeout_rejects_negative_value() -> None:
@@ -142,7 +149,10 @@ def test_timeout_rejects_negative_value() -> None:
         ValueError,
         match="timeout_seconds",
     ):
-        ExecutionLimits(timeout_seconds=-1)
+        ExecutionLimits(
+            timeout_seconds=-1,
+        )
+
 
 def test_repeated_tool_calls_are_allowed_up_to_limit() -> None:
     limits = ExecutionLimits(
@@ -174,6 +184,7 @@ def test_repeated_tool_call_limit_must_be_positive() -> None:
         ExecutionLimits(
             max_repeated_tool_calls=0,
         )
+
 
 def test_per_tool_limit_allows_calls_before_limit() -> None:
     limits = ExecutionLimits(
@@ -208,7 +219,10 @@ def test_unconfigured_tool_has_no_per_tool_limit() -> None:
         },
     )
 
-    limits.validate_per_tool_call("web_search", 100)
+    limits.validate_per_tool_call(
+        "web_search",
+        100,
+    )
 
 
 def test_per_tool_limit_can_be_zero() -> None:
@@ -222,7 +236,10 @@ def test_per_tool_limit_can_be_zero() -> None:
         ExecutionLimitExceeded,
         match="maximum calls for tool 'calculator'",
     ):
-        limits.validate_per_tool_call("calculator", 0)
+        limits.validate_per_tool_call(
+            "calculator",
+            0,
+        )
 
 
 def test_per_tool_limit_cannot_be_negative() -> None:
@@ -235,3 +252,95 @@ def test_per_tool_limit_cannot_be_negative() -> None:
                 "calculator": -1,
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Remaining budget tests
+# ---------------------------------------------------------------------------
+
+
+def test_remaining_steps() -> None:
+    limits = ExecutionLimits(
+        max_steps=10,
+    )
+
+    assert limits.remaining_steps(0) == 10
+    assert limits.remaining_steps(4) == 6
+    assert limits.remaining_steps(10) == 0
+    assert limits.remaining_steps(15) == 0
+
+
+def test_remaining_tool_calls() -> None:
+    limits = ExecutionLimits(
+        max_tool_calls=20,
+    )
+
+    assert limits.remaining_tool_calls(0) == 20
+    assert limits.remaining_tool_calls(7) == 13
+    assert limits.remaining_tool_calls(20) == 0
+    assert limits.remaining_tool_calls(25) == 0
+
+
+def test_remaining_repeated_tool_calls() -> None:
+    limits = ExecutionLimits(
+        max_repeated_tool_calls=3,
+    )
+
+    assert limits.remaining_repeated_tool_calls(0) == 3
+    assert limits.remaining_repeated_tool_calls(1) == 2
+    assert limits.remaining_repeated_tool_calls(3) == 0
+    assert limits.remaining_repeated_tool_calls(5) == 0
+
+
+def test_remaining_per_tool_calls() -> None:
+    limits = ExecutionLimits(
+        per_tool_limits={
+            "calculator": 5,
+        },
+    )
+
+    assert limits.remaining_per_tool_calls(
+        "calculator",
+        0,
+    ) == 5
+
+    assert limits.remaining_per_tool_calls(
+        "calculator",
+        2,
+    ) == 3
+
+    assert limits.remaining_per_tool_calls(
+        "calculator",
+        5,
+    ) == 0
+
+    assert limits.remaining_per_tool_calls(
+        "web_search",
+        100,
+    ) is None
+
+
+def test_remaining_timeout() -> None:
+    limits = ExecutionLimits(
+        timeout_seconds=10.0,
+    )
+
+    started_at = time.monotonic()
+
+    remaining = limits.remaining_timeout(
+        started_at,
+    )
+
+    assert 0.0 < remaining <= 10.0
+
+
+def test_remaining_timeout_returns_zero_when_expired() -> None:
+    limits = ExecutionLimits(
+        timeout_seconds=1.0,
+    )
+
+    started_at = time.monotonic() - 2.0
+
+    assert limits.remaining_timeout(
+        started_at,
+    ) == 0.0
