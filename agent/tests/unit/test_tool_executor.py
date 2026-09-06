@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from app.sandbox.client import ToolSandboxClient
+from app.agent_runtime.idempotency import (
+    InMemoryIdempotencyStore,
+)
 from app.tools.executor import ToolExecutor
 from app.tools.registry import Tool, ToolRegistry
 from app.tools.result import ToolResult
@@ -30,6 +34,32 @@ class FakeSandbox:
 
         if self.error is not None:
             raise self.error
+
+        return self.result
+
+
+class BlockingSandbox(FakeSandbox):
+    """
+    Fake sandbox that blocks execution until explicitly released.
+
+    Used to verify that concurrent requests with the same
+    idempotency key do not execute the sandbox more than once.
+    """
+
+    def __init__(self, *, result: str = "hello") -> None:
+        super().__init__(result=result)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def execute(
+        self,
+        name: str,
+        arguments: dict,
+    ) -> str:
+        self.calls.append((name, arguments))
+        self.started.set()
+
+        await self.release.wait()
 
         return self.result
 
@@ -191,3 +221,235 @@ async def test_executor_records_duration() -> None:
 
     assert result.duration_seconds is not None
     assert result.duration_seconds >= 0
+
+
+# ------------------------------------------------------------------
+# IDEMPOTENCY
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_executor_idempotency_first_call_executes_tool() -> None:
+    registry = create_registry()
+    sandbox = FakeSandbox(result="hello")
+    store = InMemoryIdempotencyStore()
+
+    executor = ToolExecutor(
+        registry=registry,
+        sandbox=sandbox,
+        idempotency_store=store,
+    )
+
+    result = await executor.execute(
+        name="echo",
+        arguments={"value": "hello"},
+        idempotency_key="operation-1",
+    )
+
+    assert result.success is True
+    assert result.output == "hello"
+
+    assert sandbox.calls == [
+        ("echo", {"value": "hello"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_idempotency_returns_previous_result() -> None:
+    registry = create_registry()
+    sandbox = FakeSandbox(result="hello")
+    store = InMemoryIdempotencyStore()
+
+    executor = ToolExecutor(
+        registry=registry,
+        sandbox=sandbox,
+        idempotency_store=store,
+    )
+
+    first_result = await executor.execute(
+        name="echo",
+        arguments={"value": "hello"},
+        idempotency_key="operation-1",
+    )
+
+    second_result = await executor.execute(
+        name="echo",
+        arguments={"value": "hello"},
+        idempotency_key="operation-1",
+    )
+
+    assert second_result is first_result
+
+    # The side effect happened only once.
+    assert sandbox.calls == [
+        ("echo", {"value": "hello"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_same_key_does_not_execute_different_arguments() -> None:
+    registry = create_registry()
+    sandbox = FakeSandbox(result="first")
+    store = InMemoryIdempotencyStore()
+
+    executor = ToolExecutor(
+        registry=registry,
+        sandbox=sandbox,
+        idempotency_store=store,
+    )
+
+    first_result = await executor.execute(
+        name="echo",
+        arguments={"value": "first"},
+        idempotency_key="operation-1",
+    )
+
+    second_result = await executor.execute(
+        name="echo",
+        arguments={"value": "second"},
+        idempotency_key="operation-1",
+    )
+
+    assert first_result.output == "first"
+    assert second_result.output == "first"
+
+    # Idempotency is based on the logical operation key, not
+    # the arguments supplied by the duplicate request.
+    assert sandbox.calls == [
+        ("echo", {"value": "first"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_different_keys_execute_independently() -> None:
+    registry = create_registry()
+    sandbox = FakeSandbox(result="hello")
+    store = InMemoryIdempotencyStore()
+
+    executor = ToolExecutor(
+        registry=registry,
+        sandbox=sandbox,
+        idempotency_store=store,
+    )
+
+    first_result = await executor.execute(
+        name="echo",
+        arguments={"value": "one"},
+        idempotency_key="operation-1",
+    )
+
+    second_result = await executor.execute(
+        name="echo",
+        arguments={"value": "two"},
+        idempotency_key="operation-2",
+    )
+
+    assert first_result.success is True
+    assert second_result.success is True
+
+    assert sandbox.calls == [
+        ("echo", {"value": "one"}),
+        ("echo", {"value": "two"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_failed_operation_releases_idempotency_key() -> None:
+    registry = create_registry()
+    store = InMemoryIdempotencyStore()
+
+    failing_sandbox = FakeSandbox(
+        error=RuntimeError("temporary failure"),
+    )
+
+    failing_executor = ToolExecutor(
+        registry=registry,
+        sandbox=failing_sandbox,
+        idempotency_store=store,
+    )
+
+    first_result = await failing_executor.execute(
+        name="echo",
+        arguments={"value": "hello"},
+        idempotency_key="operation-1",
+    )
+
+    assert first_result.success is False
+
+    # A later attempt using the same key must be allowed to
+    # execute because the original operation failed.
+    successful_sandbox = FakeSandbox(result="recovered")
+
+    successful_executor = ToolExecutor(
+        registry=registry,
+        sandbox=successful_sandbox,
+        idempotency_store=store,
+    )
+
+    second_result = await successful_executor.execute(
+        name="echo",
+        arguments={"value": "hello"},
+        idempotency_key="operation-1",
+    )
+
+    assert second_result.success is True
+    assert second_result.output == "recovered"
+
+    assert successful_sandbox.calls == [
+        ("echo", {"value": "hello"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_concurrent_same_key_executes_once() -> None:
+    registry = create_registry()
+    sandbox = BlockingSandbox(result="hello")
+    store = InMemoryIdempotencyStore()
+
+    executor = ToolExecutor(
+        registry=registry,
+        sandbox=sandbox,
+        idempotency_store=store,
+    )
+
+    first_task = asyncio.create_task(
+        executor.execute(
+            name="echo",
+            arguments={"value": "hello"},
+            idempotency_key="operation-1",
+        )
+    )
+
+    # Wait until the first caller has actually entered the sandbox.
+    await sandbox.started.wait()
+
+    second_task = asyncio.create_task(
+        executor.execute(
+            name="echo",
+            arguments={"value": "hello"},
+            idempotency_key="operation-1",
+        )
+    )
+
+    # Give the second task an opportunity to reach the idempotency
+    # wait path before allowing the first operation to finish.
+    await asyncio.sleep(0)
+
+    sandbox.release.set()
+
+    first_result, second_result = await asyncio.gather(
+        first_task,
+        second_task,
+    )
+
+    assert first_result.success is True
+    assert second_result.success is True
+
+    assert first_result.output == "hello"
+    assert second_result.output == "hello"
+
+    # Critical idempotency guarantee:
+    # only one caller reached the sandbox.
+    assert sandbox.calls == [
+        ("echo", {"value": "hello"}),
+    ]
