@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -39,28 +38,47 @@ class Execution:
         INFERENCE
          /      \
         v        v
-    TOOL_EXECUTION  COMPLETED
-        |
-        v
-    OBSERVING
+    TOOL_EXECUTION  WAITING_APPROVAL
+        |                |
+        v                v
+    OBSERVING       TOOL_EXECUTION
         |
         v
     INFERENCE
 
+    INFERENCE may also transition directly to COMPLETED when no tool
+    execution is required.
+
     Any active state may transition to FAILED or CANCELLED.
+
+    WAITING_APPROVAL is an active, non-terminal state. The execution
+    remains RUNNING at the legacy ExecutionStatus level while the
+    detailed ExecutionState records that human input is required.
     """
 
     id: UUID = field(default_factory=uuid4)
 
-    # Backward-compatible status field.
+    # ------------------------------------------------------------------
+    # Backward-compatible status
+    # ------------------------------------------------------------------
+
+    # ExecutionState is the authoritative lifecycle state.
     #
-    # ExecutionState is the authoritative state. This field exists so
-    # existing callers that still consume ExecutionStatus continue to work.
+    # ExecutionStatus remains available for compatibility with existing
+    # callers and APIs.
     status: ExecutionStatus = ExecutionStatus.CREATED
+
+    # ------------------------------------------------------------------
+    # Timestamps
+    # ------------------------------------------------------------------
 
     created_at: datetime = field(default_factory=utc_now)
     started_at: datetime | None = None
     completed_at: datetime | None = None
+
+    # ------------------------------------------------------------------
+    # Execution metadata
+    # ------------------------------------------------------------------
 
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -88,13 +106,19 @@ class Execution:
         """
         return self.state_machine.state
 
-    def can_transition_to(self, target: ExecutionState) -> bool:
+    def can_transition_to(
+        self,
+        target: ExecutionState,
+    ) -> bool:
         """
         Return whether the execution can transition to the target state.
         """
         return self.state_machine.can_transition_to(target)
 
-    def transition_to(self, target: ExecutionState) -> None:
+    def transition_to(
+        self,
+        target: ExecutionState,
+    ) -> None:
         """
         Transition the execution to a new lifecycle state.
 
@@ -144,6 +168,7 @@ class Execution:
         if self.state in {
             ExecutionState.PLANNING,
             ExecutionState.INFERENCE,
+            ExecutionState.WAITING_APPROVAL,
             ExecutionState.TOOL_EXECUTION,
             ExecutionState.OBSERVING,
         }:
@@ -170,18 +195,22 @@ class Execution:
 
         We preserve that behavior at the public compatibility boundary
         while still ensuring the actual state machine reaches COMPLETED
-        through its valid transition path:
+        through a valid transition path:
 
             PLANNING -> INFERENCE -> COMPLETED
         """
         if self.state is ExecutionState.PLANNING:
             # Compatibility bridge for the old mark_started()/mark_completed()
             # sequence.
-            self.state_machine.transition_to(ExecutionState.INFERENCE)
+            self.state_machine.transition_to(
+                ExecutionState.INFERENCE
+            )
             self._sync_status()
 
         if self.state is ExecutionState.INFERENCE:
-            self.transition_to(ExecutionState.COMPLETED)
+            self.transition_to(
+                ExecutionState.COMPLETED
+            )
             return
 
         if self.state is ExecutionState.COMPLETED:
@@ -206,7 +235,9 @@ class Execution:
         Failure is allowed from any non-terminal state.
         """
         if not error:
-            raise ValueError("Execution failure error cannot be empty")
+            raise ValueError(
+                "Execution failure error cannot be empty"
+            )
 
         if self.state in {
             ExecutionState.COMPLETED,
@@ -214,8 +245,8 @@ class Execution:
             ExecutionState.CANCELLED,
         }:
             if self.state is ExecutionState.FAILED:
-                # Preserve idempotent/update behavior for an already failed
-                # execution.
+                # Preserve idempotent/update behavior for an already
+                # failed execution.
                 self.error = error
                 self.error_type = error_type
                 return
@@ -228,7 +259,9 @@ class Execution:
         self.error = error
         self.error_type = error_type
 
-        self.transition_to(ExecutionState.FAILED)
+        self.transition_to(
+            ExecutionState.FAILED
+        )
 
     def mark_cancelled(self) -> None:
         """
@@ -247,13 +280,18 @@ class Execution:
                 f"'{self.state.value}'"
             )
 
-        self.transition_to(ExecutionState.CANCELLED)
+        self.transition_to(
+            ExecutionState.CANCELLED
+        )
 
     # ------------------------------------------------------------------
     # Step tracing
     # ------------------------------------------------------------------
 
-    def add_step(self, step: Step) -> None:
+    def add_step(
+        self,
+        step: Step,
+    ) -> None:
         """
         Append a step to the execution trace.
         """
@@ -268,12 +306,17 @@ class Execution:
         Synchronize the legacy ExecutionStatus with ExecutionState.
 
         ExecutionState remains authoritative.
+
+        WAITING_APPROVAL intentionally maps to RUNNING because an
+        execution waiting for human approval is still active and has
+        not reached a terminal state.
         """
         mapping = {
             ExecutionState.CREATED: ExecutionStatus.CREATED,
 
             ExecutionState.PLANNING: ExecutionStatus.RUNNING,
             ExecutionState.INFERENCE: ExecutionStatus.RUNNING,
+            ExecutionState.WAITING_APPROVAL: ExecutionStatus.RUNNING,
             ExecutionState.TOOL_EXECUTION: ExecutionStatus.RUNNING,
             ExecutionState.OBSERVING: ExecutionStatus.RUNNING,
 
@@ -335,7 +378,9 @@ class Execution:
 
         return max(
             0.0,
-            (self.completed_at - self.started_at).total_seconds(),
+            (
+                self.completed_at - self.started_at
+            ).total_seconds(),
         )
 
     @property

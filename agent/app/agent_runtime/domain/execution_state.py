@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from enum import StrEnum
@@ -15,6 +14,7 @@ class ExecutionState(StrEnum):
     CREATED = "created"
     PLANNING = "planning"
     INFERENCE = "inference"
+    WAITING_APPROVAL = "waiting_approval"
     TOOL_EXECUTION = "tool_execution"
     OBSERVING = "observing"
     COMPLETED = "completed"

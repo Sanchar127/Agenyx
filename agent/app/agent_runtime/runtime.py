@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -6,6 +7,13 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from app.agent_runtime.approval import (
+    ApprovalAlreadyResolvedError,
+    ApprovalManager,
+    ApprovalNotFoundError,
+    ApprovalPolicy,
+    ApprovalStatus,
+)
 from app.agent_runtime.cancellation import CancellationToken
 from app.agent_runtime.context_manager import (
     ContextBudget,
@@ -85,6 +93,7 @@ class AgentRuntime:
     - interpret inference output through the Planner
     - execute requested tools
     - execute independent tool calls concurrently
+    - manage human approval for configured tools
     - feed tool observations back into inference
     - enforce execution limits
     - support explicit execution cancellation
@@ -130,9 +139,6 @@ class AgentRuntime:
 
     gives individual tools their own execution limits.
 
-    Tools not present in per_tool_limits have no individual limit
-    and remain subject to max_tool_calls.
-
         timeout_seconds = N
 
     defines the execution-wide wall-clock budget.
@@ -157,24 +163,29 @@ class AgentRuntime:
         available_input_tokens =
             max_context_tokens - reserved_output_tokens
 
-    Explicit cancellation:
+    Human approval:
 
-        await runtime.cancel(execution_id)
+        ApprovalPolicy
+            decides whether a tool call requires approval.
 
-    requests cancellation for one currently running execution.
+        ApprovalManager
+            creates and resolves approval requests.
 
-    Timeout cancellation and explicit cancellation remain
-    semantically distinct:
+    A tool requiring approval is never sent to ToolExecutor until
+    its approval request has been explicitly approved.
 
-        timeout      -> ExecutionLimitExceeded
-        explicit     -> ExecutionCancelled
+    Approval is associated with the exact execution_id and call_id
+    so that approval cannot accidentally authorize another tool
+    invocation.
 
     Parallel execution semantics:
 
         - The Planner validates the complete tool-call batch.
         - The runtime validates the complete batch against budgets.
-        - No tool starts until the complete batch is admitted.
-        - Independent admitted calls execute concurrently.
+        - Approval requirements are evaluated before execution.
+        - A batch containing an approval-required tool waits before
+          any tool in that batch executes.
+        - Approved calls may execute concurrently.
         - Concurrency is bounded by max_parallel_tool_calls.
         - The execution-wide timeout applies to the complete batch.
         - Normal tool failure does not cancel sibling tool calls.
@@ -200,6 +211,8 @@ class AgentRuntime:
         max_parallel_tool_calls: int = 4,
         max_context_tokens: int | None = None,
         reserved_output_tokens: int = 0,
+        approval_policy: ApprovalPolicy | None = None,
+        approval_manager: ApprovalManager | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError(
@@ -272,11 +285,24 @@ class AgentRuntime:
                 reserved_output_tokens=reserved_output_tokens,
             )
 
+        # ---------------------------------------------------------
+        # Human approval.
+        # ---------------------------------------------------------
+
+        self.approval_policy = approval_policy
+        self.approval_manager = (
+            approval_manager
+            if approval_manager is not None
+            else ApprovalManager()
+        )
+
+        # ---------------------------------------------------------
         # Execution ID -> active runtime state.
         #
         # This is intentionally local in-memory state for now.
-        # Distributed execution/session persistence will be added
-        # later.
+        # Persistent execution will be introduced later.
+        # ---------------------------------------------------------
+
         self._active_executions: dict[
             str,
             _ActiveExecution,
@@ -980,13 +1006,14 @@ class AgentRuntime:
 
         The complete batch is admitted before any tool starts.
 
-        Tool execution is bounded by
-        self.limits.max_parallel_tool_calls.
+        Human approval is evaluated after budget admission but before
+        any tool execution.
 
-        Normal tool failure does not cancel sibling tool calls.
+        If one or more tools require approval, the complete batch
+        waits before execution. This preserves the existing
+        all-or-nothing batch admission semantics.
 
-        Explicit cancellation and execution timeout cancel the
-        entire active batch.
+        Approved tools are then executed concurrently.
 
         Results are applied to shared ExecutionContext sequentially
         in original model order.
@@ -1160,11 +1187,6 @@ class AgentRuntime:
 
         # ---------------------------------------------------------
         # Add the assistant message once for the complete batch.
-        #
-        # IMPORTANT:
-        # This goes through ContextManager so that the complete
-        # assistant tool-call message becomes part of the
-        # managed LLM context.
         # ---------------------------------------------------------
 
         assistant_message = (
@@ -1178,7 +1200,7 @@ class AgentRuntime:
         )
 
         # ---------------------------------------------------------
-        # Record tool-call steps before execution.
+        # Record tool-call steps before approval/execution.
         # ---------------------------------------------------------
 
         for tool_call, _ in admissions:
@@ -1204,6 +1226,25 @@ class AgentRuntime:
             }
 
             step.mark_completed()
+
+        # ---------------------------------------------------------
+        # Human approval.
+        #
+        # IMPORTANT:
+        # No ToolExecutor call occurs before this stage completes.
+        # ---------------------------------------------------------
+
+        await self._handle_required_approvals(
+            execution=execution,
+            context=context,
+            admissions=admissions,
+            execution_started_at=execution_started_at,
+            cancellation=cancellation,
+        )
+
+        self._check_cancellation(
+            cancellation
+        )
 
         # ---------------------------------------------------------
         # Execute concurrently.
@@ -1406,6 +1447,236 @@ class AgentRuntime:
 
             raise first_failure
 
+    async def _handle_required_approvals(
+        self,
+        *,
+        execution: Execution,
+        context: ExecutionContext,
+        admissions: list[
+            tuple[
+                ToolCall,
+                tuple[str, str],
+            ]
+        ],
+        execution_started_at: float,
+        cancellation: CancellationToken,
+    ) -> None:
+        """
+        Determine whether any admitted tool calls require approval.
+
+        If no approval policy is configured, this method is a no-op.
+
+        If approval is required, an ApprovalRequest is created for
+        the exact execution_id + call_id pair.
+
+        The execution transitions to WAITING_APPROVAL and waits until
+        every required approval has been resolved.
+
+        No tool execution is started while approval is pending.
+
+        A rejected approval fails the execution.
+
+        Approval waiting remains subject to the global execution
+        timeout and explicit cancellation.
+        """
+
+        if self.approval_policy is None:
+            return
+
+        required: list[
+            tuple[
+                ToolCall,
+                str,
+            ]
+        ] = []
+
+        execution_id = str(
+            execution.id
+        )
+
+        # ---------------------------------------------------------
+        # Determine required approvals.
+        # ---------------------------------------------------------
+
+        for tool_call, _ in admissions:
+            self._check_cancellation(
+                cancellation
+            )
+
+            self.limits.validate_timeout(
+                execution_started_at
+            )
+
+            requires_approval = (
+                await self.approval_policy.requires_approval(
+                    tool_name=tool_call.name,
+                    arguments=dict(
+                        tool_call.arguments
+                    ),
+                    context=context,
+                )
+            )
+
+            if not requires_approval:
+                continue
+
+            approval_id = (
+                f"{execution_id}:"
+                f"{tool_call.call_id}"
+            )
+
+            required.append(
+                (
+                    tool_call,
+                    approval_id,
+                )
+            )
+
+        if not required:
+            return
+
+        # ---------------------------------------------------------
+        # Create approval requests before entering the waiting
+        # state.
+        # ---------------------------------------------------------
+
+        for tool_call, approval_id in required:
+            self._check_cancellation(
+                cancellation
+            )
+
+            await self.approval_manager.create_request(
+                approval_id=approval_id,
+                execution_id=execution_id,
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+                arguments=dict(
+                    tool_call.arguments
+                ),
+            )
+
+            logger.info(
+                "Human approval required",
+                extra={
+                    "execution_id": execution_id,
+                    "approval_id": approval_id,
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.name,
+                },
+            )
+
+        # ---------------------------------------------------------
+        # Explicit lifecycle state.
+        # ---------------------------------------------------------
+
+        execution.transition_to(
+            ExecutionState.WAITING_APPROVAL
+        )
+
+        # ---------------------------------------------------------
+        # Wait for all approval decisions.
+        #
+        # Each approval is independent, but the batch cannot execute
+        # until every required approval is resolved.
+        # ---------------------------------------------------------
+
+        async def wait_for_approval(
+            approval_id: str,
+        ) -> None:
+            while True:
+                self._check_cancellation(
+                    cancellation
+                )
+
+                self.limits.validate_timeout(
+                    execution_started_at
+                )
+
+                remaining_timeout = (
+                    self._remaining_timeout(
+                        execution_started_at
+                    )
+                )
+
+                try:
+                    request = await asyncio.wait_for(
+                        self.approval_manager.wait_for_resolution(
+                            approval_id
+                        ),
+                        timeout=remaining_timeout,
+                    )
+
+                except asyncio.TimeoutError as exc:
+                    raise ExecutionLimitExceeded(
+                        "Agent execution exceeded timeout "
+                        "while waiting for human approval: "
+                        f"{self.limits.timeout_seconds} seconds"
+                    ) from exc
+
+                except asyncio.CancelledError as exc:
+                    cancellation.cancel()
+
+                    raise ExecutionCancelled(
+                        "Agent execution was cancelled while "
+                        "waiting for human approval"
+                    ) from exc
+
+                if request.status is ApprovalStatus.APPROVED:
+                    logger.info(
+                        "Human approval granted",
+                        extra={
+                            "execution_id": execution_id,
+                            "approval_id": approval_id,
+                            "call_id": request.call_id,
+                            "tool_name": request.tool_name,
+                        },
+                    )
+
+                    return
+
+                if request.status is ApprovalStatus.REJECTED:
+                    raise ToolExecutionError(
+                        "Human approval rejected for tool "
+                        f"'{request.tool_name}' "
+                        f"(call_id={request.call_id})"
+                    )
+
+                # Defensive handling in case the manager returns
+                # a still-pending request.
+                await asyncio.sleep(0)
+
+        try:
+            await asyncio.gather(
+                *[
+                    wait_for_approval(
+                        approval_id
+                    )
+                    for _, approval_id in required
+                ]
+            )
+
+        except (
+            ApprovalNotFoundError,
+            ApprovalAlreadyResolvedError,
+        ):
+            raise
+
+        self._check_cancellation(
+            cancellation
+        )
+
+        self.limits.validate_timeout(
+            execution_started_at
+        )
+
+        logger.info(
+            "All required human approvals granted",
+            extra={
+                "execution_id": execution_id,
+                "approval_count": len(required),
+            },
+        )
+
     async def _execute_single_tool(
         self,
         *,
@@ -1414,9 +1685,12 @@ class AgentRuntime:
         cancellation: CancellationToken,
     ) -> Any:
         """
-        Execute one already-admitted tool.
+        Execute one already-admitted and approved tool.
 
         No shared ExecutionContext mutation happens here.
+
+        Approval has already been resolved before this method is
+        called.
 
         Cancellation is deliberately propagated unchanged.
         The parallel batch coordinator owns conversion into the
@@ -1440,7 +1714,7 @@ class AgentRuntime:
                     arguments=dict(
                         tool_call.arguments
                     ),
-                        context=None,
+                    context=None,
                 ),
                 timeout=remaining_timeout,
             )

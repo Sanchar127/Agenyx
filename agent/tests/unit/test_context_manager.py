@@ -1,261 +1,668 @@
-from app.agent_runtime.context_manager import ContextManager
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Protocol
+
 from app.agent_runtime.domain.context import ExecutionContext
-from app.agent_runtime.domain.execution import Execution
 
 
-def create_manager() -> ContextManager:
-    context = ExecutionContext(
-        execution=Execution(),
-    )
+class TokenCounter(Protocol):
+    """
+    Abstraction for counting tokens in LLM messages.
 
-    return ContextManager(context)
+    Different model providers can later provide model-specific
+    tokenizers without changing ContextManager.
+    """
+
+    def count_message_tokens(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> int:
+        ...
 
 
-def test_context_manager_requires_execution_context():
-    try:
-        ContextManager(None)  # type: ignore[arg-type]
-    except TypeError as exc:
-        assert str(exc) == (
-            "ContextManager requires a valid ExecutionContext"
+@dataclass(frozen=True)
+class CharacterTokenCounter:
+    """
+    Deterministic token estimator.
+
+    This is intentionally an approximation rather than a
+    model-specific tokenizer.
+
+    A real model-specific tokenizer can be injected later.
+    """
+
+    characters_per_token: int = 4
+
+    def __post_init__(self) -> None:
+        if self.characters_per_token <= 0:
+            raise ValueError(
+                "characters_per_token must be greater than zero"
+            )
+
+    def count_message_tokens(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> int:
+        total_characters = 0
+
+        for message in messages:
+            total_characters += self._count_value(message)
+
+        if total_characters == 0:
+            return 0
+
+        return (
+            total_characters
+            + self.characters_per_token
+            - 1
+        ) // self.characters_per_token
+
+    def _count_value(
+        self,
+        value: Any,
+    ) -> int:
+        if value is None:
+            return 0
+
+        if isinstance(value, str):
+            return len(value)
+
+        if isinstance(value, dict):
+            return sum(
+                self._count_value(key)
+                + self._count_value(item)
+                for key, item in value.items()
+            )
+
+        if isinstance(value, (list, tuple)):
+            return sum(
+                self._count_value(item)
+                for item in value
+            )
+
+        return len(str(value))
+
+
+@dataclass(frozen=True)
+class ContextBudget:
+    """
+    Token budget for one LLM context.
+
+    max_context_tokens:
+        Maximum context window supported by the target model.
+
+    reserved_output_tokens:
+        Tokens reserved for the model's response.
+
+    Therefore:
+
+        available_input_tokens =
+            max_context_tokens
+            - reserved_output_tokens
+    """
+
+    max_context_tokens: int
+    reserved_output_tokens: int = 0
+
+    def __post_init__(self) -> None:
+        if self.max_context_tokens <= 0:
+            raise ValueError(
+                "max_context_tokens must be greater than zero"
+            )
+
+        if self.reserved_output_tokens < 0:
+            raise ValueError(
+                "reserved_output_tokens cannot be negative"
+            )
+
+        if self.reserved_output_tokens >= self.max_context_tokens:
+            raise ValueError(
+                "reserved_output_tokens must be smaller "
+                "than max_context_tokens"
+            )
+
+    @property
+    def available_input_tokens(self) -> int:
+        return (
+            self.max_context_tokens
+            - self.reserved_output_tokens
         )
-    else:
-        raise AssertionError("Expected TypeError")
 
 
-def test_context_manager_exposes_underlying_context():
-    manager = create_manager()
+class ContextManager:
+    """
+    Manages the LLM-facing context for one agent execution.
 
-    assert isinstance(
-        manager.context,
-        ExecutionContext,
-    )
+    ContextManager deliberately owns context policy while
+    ExecutionContext remains the execution-state container.
 
+    Responsibilities:
+    - semantic message management
+    - tool-call management
+    - observation management
+    - token estimation
+    - context-window budgeting
+    - deterministic context trimming
+    - construction of inference-ready messages
 
-def test_add_system_message():
-    manager = create_manager()
+    It does NOT own:
+    - execution lifecycle
+    - execution state transitions
+    - cancellation
+    - execution limits
+    - authorization
+    - tool execution
+    """
 
-    manager.add_system_message(
-        "You are an AI assistant."
-    )
+    def __init__(
+        self,
+        context: ExecutionContext,
+        *,
+        token_counter: TokenCounter | None = None,
+        budget: ContextBudget | None = None,
+    ) -> None:
+        if not isinstance(
+            context,
+            ExecutionContext,
+        ):
+            raise TypeError(
+                "ContextManager requires a valid ExecutionContext"
+            )
 
-    assert manager.get_messages() == [
-        {
-            "role": "system",
-            "content": "You are an AI assistant.",
-        }
-    ]
+        self._context = context
 
+        self._token_counter = (
+            token_counter
+            or CharacterTokenCounter()
+        )
 
-def test_add_user_message():
-    manager = create_manager()
+        self._budget = budget
 
-    manager.add_user_message(
-        "Calculate 25 * 17."
-    )
+    @property
+    def context(self) -> ExecutionContext:
+        return self._context
 
-    assert manager.get_messages() == [
-        {
-            "role": "user",
-            "content": "Calculate 25 * 17.",
-        }
-    ]
+    @property
+    def budget(self) -> ContextBudget | None:
+        return self._budget
 
+    # =========================================================
+    # Message management
+    # =========================================================
 
-def test_add_assistant_message():
-    manager = create_manager()
+    def add_message(
+        self,
+        message: dict[str, Any],
+    ) -> None:
+        if not isinstance(message, dict):
+            raise TypeError(
+                "message must be a dictionary"
+            )
 
-    message = {
-        "role": "assistant",
-        "content": "The answer is 425.",
-    }
+        role = message.get("role")
 
-    manager.add_assistant_message(message)
+        if not isinstance(role, str) or not role:
+            raise ValueError(
+                "message must contain a valid role"
+            )
 
-    assert manager.get_messages() == [message]
+        self._context.add_message(
+            dict(message)
+        )
 
+    def add_system_message(
+        self,
+        content: str,
+    ) -> None:
+        if not isinstance(content, str):
+            raise TypeError(
+                "system message content must be a string"
+            )
 
-def test_assistant_message_requires_assistant_role():
-    manager = create_manager()
-
-    try:
-        manager.add_assistant_message(
+        self.add_message(
             {
-                "role": "user",
-                "content": "invalid",
+                "role": "system",
+                "content": content,
             }
         )
-    except ValueError as exc:
-        assert str(exc) == (
-            "Assistant message must have role 'assistant'"
+
+    def add_user_message(
+        self,
+        content: str,
+    ) -> None:
+        if not isinstance(content, str):
+            raise TypeError(
+                "user message content must be a string"
+            )
+
+        self.add_message(
+            {
+                "role": "user",
+                "content": content,
+            }
         )
-    else:
-        raise AssertionError("Expected ValueError")
 
+    def add_assistant_message(
+        self,
+        message: dict[str, Any],
+    ) -> None:
+        if message.get("role") != "assistant":
+            raise ValueError(
+                "Assistant message must have role 'assistant'"
+            )
 
-def test_add_tool_message():
-    manager = create_manager()
+        self.add_message(message)
 
-    manager.add_tool_message(
-        call_id="call-1",
-        name="calculator",
-        content="425",
-    )
+    def add_tool_message(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        content: str,
+    ) -> None:
+        if not call_id:
+            raise ValueError(
+                "Tool message requires a call_id"
+            )
 
-    assert manager.get_messages() == [
-        {
-            "role": "tool",
-            "tool_call_id": "call-1",
-            "name": "calculator",
-            "content": "425",
-        }
-    ]
+        if not name:
+            raise ValueError(
+                "Tool message requires a tool name"
+            )
 
+        if not isinstance(content, str):
+            raise TypeError(
+                "Tool message content must be a string"
+            )
 
-def test_tool_message_requires_call_id():
-    manager = create_manager()
-
-    try:
-        manager.add_tool_message(
-            call_id="",
-            name="calculator",
-            content="425",
+        self.add_message(
+            {
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": name,
+                "content": content,
+            }
         )
-    except ValueError as exc:
-        assert str(exc) == (
-            "Tool message requires a call_id"
+
+    def get_messages(
+        self,
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(message)
+            for message in self._context.messages
+        ]
+
+    # =========================================================
+    # Tool-call / observation management
+    # =========================================================
+
+    def add_tool_call(
+        self,
+        tool_call: dict[str, Any],
+    ) -> None:
+        if not isinstance(tool_call, dict):
+            raise TypeError(
+                "tool_call must be a dictionary"
+            )
+
+        self._context.add_tool_call(
+            dict(tool_call)
         )
-    else:
-        raise AssertionError("Expected ValueError")
 
+    def get_tool_calls(
+        self,
+    ) -> list[dict[str, Any]]:
+        return [
+            dict(tool_call)
+            for tool_call in self._context.tool_calls
+        ]
 
-def test_tool_message_requires_name():
-    manager = create_manager()
+    @property
+    def tool_call_count(self) -> int:
+        return self._context.tool_call_count
 
-    try:
-        manager.add_tool_message(
-            call_id="call-1",
-            name="",
-            content="425",
+    def add_observation(
+        self,
+        observation: str,
+    ) -> None:
+        self._context.add_observation(
+            observation
         )
-    except ValueError as exc:
-        assert str(exc) == (
-            "Tool message requires a tool name"
+
+    def get_observations(
+        self,
+    ) -> list[str]:
+        return list(
+            self._context.observations
         )
-    else:
-        raise AssertionError("Expected ValueError")
 
+    # =========================================================
+    # Token management
+    # =========================================================
 
-def test_get_messages_returns_snapshot():
-    manager = create_manager()
+    def token_count(
+        self,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """
+        Return the estimated token count of the supplied
+        messages or the current context.
+        """
 
-    manager.add_user_message("hello")
+        target_messages = (
+            self.get_messages()
+            if messages is None
+            else messages
+        )
 
-    messages = manager.get_messages()
+        return self._token_counter.count_message_tokens(
+            target_messages
+        )
 
-    messages.append(
-        {
-            "role": "user",
-            "content": "external mutation",
-        }
-    )
+    def available_input_tokens(self) -> int | None:
+        """
+        Return the maximum number of input tokens available
+        after reserving output tokens.
+        """
 
-    assert manager.get_messages() == [
-        {
-            "role": "user",
-            "content": "hello",
-        }
-    ]
+        if self._budget is None:
+            return None
 
+        return self._budget.available_input_tokens
 
-def test_add_tool_call():
-    manager = create_manager()
+    def remaining_input_tokens(
+        self,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> int | None:
+        """
+        Return remaining input capacity.
 
-    tool_call = {
-        "id": "call-1",
-        "name": "calculator",
-        "arguments": {
-            "expression": "25 * 17",
-        },
-        "result": "425",
-    }
+        Returns None when no context budget is configured.
+        """
 
-    manager.add_tool_call(tool_call)
+        available = self.available_input_tokens()
 
-    assert manager.get_tool_calls() == [tool_call]
-    assert manager.tool_call_count == 1
+        if available is None:
+            return None
 
+        used = self.token_count(messages)
 
-def test_get_tool_calls_returns_snapshot():
-    manager = create_manager()
+        return max(
+            available - used,
+            0,
+        )
 
-    manager.add_tool_call(
-        {
-            "id": "call-1",
-            "name": "calculator",
-            "arguments": {},
-            "result": "425",
-        }
-    )
+    def exceeds_budget(
+        self,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> bool:
+        """
+        Return whether the context exceeds the configured
+        input-token budget.
+        """
 
-    tool_calls = manager.get_tool_calls()
+        available = self.available_input_tokens()
 
-    tool_calls.clear()
+        if available is None:
+            return False
 
-    assert manager.tool_call_count == 1
+        return (
+            self.token_count(messages)
+            > available
+        )
 
+    # =========================================================
+    # Context reduction
+    # =========================================================
 
-def test_add_observation():
-    manager = create_manager()
+    def get_messages_for_inference(
+        self,
+    ) -> list[dict[str, Any]]:
+        """
+        Return the context that should be sent to inference.
 
-    manager.add_observation(
-        "The calculator returned 425."
-    )
+        The full ExecutionContext history is never modified.
 
-    assert manager.get_observations() == [
-        "The calculator returned 425."
-    ]
+        When the context exceeds its budget, the oldest
+        conversation units are removed while preserving:
+        - the system message
+        - complete assistant tool-call/tool-result units
+        - the newest possible context
+        """
 
+        messages = self.get_messages()
 
-def test_get_observations_returns_snapshot():
-    manager = create_manager()
+        if not messages:
+            return []
 
-    manager.add_observation("result")
+        if not self.exceeds_budget(messages):
+            return messages
 
-    observations = manager.get_observations()
+        return self._trim_messages(
+            messages
+        )
 
-    observations.clear()
+    def trim_to_budget(self) -> list[dict[str, Any]]:
+        """
+        Explicitly mutate the stored message history so that
+        it fits within the configured context budget.
 
-    assert manager.get_observations() == [
-        "result"
-    ]
+        This is intentionally separate from
+        get_messages_for_inference(), which is non-destructive.
+        """
 
+        trimmed = self.get_messages_for_inference()
 
-def test_clear_only_clears_llm_context():
-    manager = create_manager()
+        self._context.messages[:] = trimmed
 
-    manager.add_user_message("hello")
+        return self.get_messages()
 
-    manager.add_tool_call(
-        {
-            "id": "call-1",
-            "name": "calculator",
-            "arguments": {},
-            "result": "425",
-        }
-    )
+    def _trim_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Trim messages using complete conversation units.
 
-    manager.add_observation("425")
+        A conversation unit is either:
 
-    manager.context.current_step = 3
-    manager.context.metadata["model"] = "test-model"
+        - a normal individual message
+        - an assistant tool-call message followed by its
+          contiguous tool-result messages
 
-    manager.clear()
+        This prevents invalid contexts such as:
 
-    assert manager.get_messages() == []
-    assert manager.get_tool_calls() == []
-    assert manager.get_observations() == []
+            tool(result)
 
-    assert manager.context.current_step == 3
-    assert manager.context.metadata == {
-        "model": "test-model",
-    }
+        without:
+
+            assistant(tool_call)
+        """
+
+        available = self.available_input_tokens()
+
+        if available is None:
+            return list(messages)
+
+        if not messages:
+            return []
+
+        system_message: dict[str, Any] | None = None
+        conversation_messages: list[
+            dict[str, Any]
+        ] = []
+
+        for message in messages:
+            if (
+                system_message is None
+                and message.get("role") == "system"
+            ):
+                system_message = message
+                continue
+
+            conversation_messages.append(message)
+
+        # -----------------------------------------------------
+        # Build coherent conversation units.
+        # -----------------------------------------------------
+
+        units = self._build_conversation_units(
+            conversation_messages
+        )
+
+        # -----------------------------------------------------
+        # Reserve space for the system message.
+        # -----------------------------------------------------
+
+        remaining_budget = available
+
+        if system_message is not None:
+            system_tokens = self.token_count(
+                [system_message]
+            )
+
+            if system_tokens > available:
+                # There is no valid context that can preserve
+                # the system message within this budget.
+                return []
+
+            remaining_budget -= system_tokens
+
+        # -----------------------------------------------------
+        # Select newest complete units first.
+        # -----------------------------------------------------
+
+        selected_units: list[
+            list[dict[str, Any]]
+        ] = []
+
+        for unit in reversed(units):
+            unit_tokens = self.token_count(unit)
+
+            if unit_tokens > remaining_budget:
+                continue
+
+            selected_units.insert(
+                0,
+                unit,
+            )
+
+            remaining_budget -= unit_tokens
+
+            if remaining_budget <= 0:
+                break
+
+        # -----------------------------------------------------
+        # Reconstruct original provider message order.
+        # -----------------------------------------------------
+
+        selected_messages: list[
+            dict[str, Any]
+        ] = []
+
+        if system_message is not None:
+            selected_messages.append(
+                system_message
+            )
+
+        for unit in selected_units:
+            selected_messages.extend(unit)
+
+        return selected_messages
+
+    def _build_conversation_units(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        """
+        Convert raw messages into coherent conversation units.
+
+        Example:
+
+            user
+            assistant
+            assistant(tool_calls)
+            tool
+            tool
+            user
+            assistant
+
+        becomes:
+
+            [
+                [user],
+                [assistant],
+                [assistant(tool_calls), tool, tool],
+                [user],
+                [assistant],
+            ]
+
+        Tool results immediately following an assistant
+        tool-call message remain part of the same unit.
+        """
+
+        units: list[list[dict[str, Any]]] = []
+
+        index = 0
+
+        while index < len(messages):
+            message = messages[index]
+
+            # -------------------------------------------------
+            # Assistant tool-call message.
+            # -------------------------------------------------
+
+            if (
+                message.get("role") == "assistant"
+                and self._has_tool_calls(message)
+            ):
+                unit = [message]
+                index += 1
+
+                # Include all contiguous tool results.
+                while (
+                    index < len(messages)
+                    and messages[index].get("role") == "tool"
+                ):
+                    unit.append(
+                        messages[index]
+                    )
+                    index += 1
+
+                units.append(unit)
+                continue
+
+            # -------------------------------------------------
+            # Normal message.
+            # -------------------------------------------------
+
+            units.append([message])
+            index += 1
+
+        return units
+
+    @staticmethod
+    def _has_tool_calls(
+        message: dict[str, Any],
+    ) -> bool:
+        """
+        Return whether an assistant message contains
+        provider-style tool calls.
+        """
+
+        tool_calls = message.get("tool_calls")
+
+        return (
+            isinstance(tool_calls, list)
+            and bool(tool_calls)
+        )
+
+    # =========================================================
+    # Lifecycle
+    # =========================================================
+
+    def clear(self) -> None:
+        self._context.messages.clear()
+        self._context.tool_calls.clear()
+        self._context.observations.clear()

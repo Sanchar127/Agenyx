@@ -34,6 +34,7 @@ class ExecutionStateMachine:
                 ExecutionState.CANCELLED,
             }
         ),
+
         ExecutionState.PLANNING: frozenset(
             {
                 ExecutionState.INFERENCE,
@@ -41,14 +42,25 @@ class ExecutionStateMachine:
                 ExecutionState.CANCELLED,
             }
         ),
+
         ExecutionState.INFERENCE: frozenset(
             {
                 ExecutionState.TOOL_EXECUTION,
+                ExecutionState.WAITING_APPROVAL,
                 ExecutionState.COMPLETED,
                 ExecutionState.FAILED,
                 ExecutionState.CANCELLED,
             }
         ),
+
+        ExecutionState.WAITING_APPROVAL: frozenset(
+            {
+                ExecutionState.TOOL_EXECUTION,
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+            }
+        ),
+
         ExecutionState.TOOL_EXECUTION: frozenset(
             {
                 ExecutionState.OBSERVING,
@@ -56,6 +68,7 @@ class ExecutionStateMachine:
                 ExecutionState.CANCELLED,
             }
         ),
+
         ExecutionState.OBSERVING: frozenset(
             {
                 ExecutionState.INFERENCE,
@@ -63,8 +76,11 @@ class ExecutionStateMachine:
                 ExecutionState.CANCELLED,
             }
         ),
+
         ExecutionState.COMPLETED: frozenset(),
+
         ExecutionState.FAILED: frozenset(),
+
         ExecutionState.CANCELLED: frozenset(),
     }
 
@@ -84,8 +100,8 @@ class ExecutionStateMachine:
         """
         Transition to target state.
 
-        Invalid lifecycle transitions are converted into the Agent-level
-        InvalidStateTransition error.
+        Invalid lifecycle transitions are converted into the
+        Agent-level InvalidStateTransition error.
         """
         if not self.can_transition_to(target):
             raise InvalidStateTransition(
@@ -98,7 +114,7 @@ class ExecutionStateMachine:
     @property
     def is_terminal(self) -> bool:
         """
-        Return whether the current state is terminal.
+        Return whether the current execution state is terminal.
         """
         return self.state in {
             ExecutionState.COMPLETED,
