@@ -11,7 +11,11 @@ from app.tools.executor import ToolExecutor
 from app.tools.registry import Tool, ToolRegistry
 from app.tools.result import ToolResult
 
-
+from app.agent_runtime.authorization import (
+    AllowListToolAuthorization,
+)
+from app.agent_runtime.domain.context import ExecutionContext
+from app.agent_runtime.domain.execution import Execution
 class FakeSandbox:
     """Fake sandbox used to test ToolExecutor without HTTP."""
 
@@ -453,3 +457,32 @@ async def test_executor_concurrent_same_key_executes_once() -> None:
     assert sandbox.calls == [
         ("echo", {"value": "hello"}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_executor_allows_authorized_tool() -> None:
+    sandbox = FakeSandbox()
+    registry = create_registry()
+
+    authorization = AllowListToolAuthorization.from_tools(
+        {"echo"},
+    )
+
+    executor = ToolExecutor(
+        registry=registry,
+        sandbox=sandbox,
+        authorization=authorization,
+    )
+
+    context = ExecutionContext(
+        execution=Execution(),
+    )
+
+    result = await executor.execute(
+        name="echo",
+        arguments={"message": "hello"},
+        context=context,
+    )
+
+    assert result.success is True
+    assert len(sandbox.calls) == 1

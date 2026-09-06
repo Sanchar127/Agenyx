@@ -1170,9 +1170,10 @@ class AgentRuntime:
 
             tool_result = await asyncio.wait_for(
                 self.tool_executor.execute(
-                    name=tool_name,
-                    arguments=arguments,
-                ),
+                name=tool_name,
+                arguments=arguments,
+                context=context,
+            ),
                 timeout=remaining_timeout,
             )
 

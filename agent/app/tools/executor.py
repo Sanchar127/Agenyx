@@ -3,6 +3,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.agent_runtime.authorization import (
+    ToolAuthorization,
+    ToolAuthorizationError,
+)
+from app.agent_runtime.domain.context import ExecutionContext
 from app.agent_runtime.idempotency import (
     IdempotencyRecord,
     IdempotencyStore,
@@ -18,15 +23,12 @@ class ToolExecutor:
 
     Responsibilities:
     - verify that the requested tool exists
+    - enforce tool authorization
     - enforce idempotency when an idempotency key is provided
     - delegate execution to the isolated sandbox
     - measure execution duration
     - normalize success and failure into ToolResult
     - preserve failure classification in ToolResult.metadata
-
-    The AgentRuntime does not need to know whether a tool is
-    implemented in Python, executed remotely, or isolated inside
-    the sandbox.
 
     Execution boundary:
 
@@ -37,7 +39,9 @@ class ToolExecutor:
              |
              +---- Tool existence check
              |
-             +---- Idempotency check
+             +---- Authorization
+             |
+             +---- Idempotency
              |
              v
           Sandbox
@@ -45,37 +49,10 @@ class ToolExecutor:
              v
         ToolResult
 
-    Idempotency flow:
+    Authorization policy:
 
-        request
-           |
-           v
-        existing result?
-         /       \
-       yes        no
-        |          |
-      return     claim key
-                   |
-             +-----+------+
-             |            |
-           owner       duplicate
-             |            |
-             v            v
-          execute       wait
-             |            |
-             v            v
-          store result -> return result
-
-    Failure classification:
-
-        unknown tool
-            -> error_type = "unknown_tool"
-
-        sandbox/infrastructure failure
-            -> error_type = exception class name
-
-        successful execution
-            -> no error_type
+        explicitly allowed -> continue
+        everything else    -> reject
 
     Idempotency:
 
@@ -96,10 +73,12 @@ class ToolExecutor:
         registry: ToolRegistry,
         sandbox: ToolSandboxClient,
         idempotency_store: IdempotencyStore | None = None,
+        authorization: ToolAuthorization | None = None,
     ) -> None:
         self.registry = registry
         self.sandbox = sandbox
         self.idempotency_store = idempotency_store
+        self.authorization = authorization
 
     async def execute(
         self,
@@ -107,23 +86,23 @@ class ToolExecutor:
         name: str,
         arguments: dict[str, Any],
         idempotency_key: str | None = None,
+        context: ExecutionContext | None = None,
     ) -> ToolResult:
         """
         Execute one tool request.
 
+        Policy order:
+
+            1. tool existence
+            2. authorization
+            3. idempotency
+            4. sandbox execution
+
+        Authorization is intentionally performed before idempotency
+        so unauthorized requests cannot participate in or benefit
+        from the idempotency flow.
+
         Every execution returns a ToolResult.
-
-        When idempotency is enabled for the request:
-        - an existing result is returned immediately
-        - a new key is claimed by exactly one caller
-        - concurrent callers wait for the first caller
-        - failed execution releases the key
-        - successful execution stores the result
-
-        The executor deliberately does not leak sandbox exceptions
-        to the AgentRuntime. Instead, failures are normalized into
-        ToolResult while preserving enough metadata for the runtime
-        to classify the failure correctly.
         """
 
         start = time.perf_counter()
@@ -145,6 +124,48 @@ class ToolExecutor:
                 },
                 duration_seconds=duration,
             )
+
+        # ---------------------------------------------------------
+        # AUTHORIZATION
+        # ---------------------------------------------------------
+
+        if self.authorization is not None:
+            if context is None:
+                duration = time.perf_counter() - start
+
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=(
+                        "Execution context is required "
+                        "for tool authorization"
+                    ),
+                    metadata={
+                        "error_type": "authorization_context_missing",
+                        "tool_name": name,
+                    },
+                    duration_seconds=duration,
+                )
+
+            try:
+                await self.authorization.authorize(
+                    tool_name=name,
+                    context=context,
+                )
+
+            except ToolAuthorizationError as exc:
+                duration = time.perf_counter() - start
+
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=str(exc),
+                    metadata={
+                        "error_type": "tool_not_authorized",
+                        "tool_name": name,
+                    },
+                    duration_seconds=duration,
+                )
 
         # ---------------------------------------------------------
         # IDEMPOTENCY

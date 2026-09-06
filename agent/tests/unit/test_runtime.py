@@ -206,6 +206,7 @@ class HangingToolExecutor:
         *,
         name: str,
         arguments: dict[str, Any],
+        context: ExecutionContext | None = None,
     ) -> Any:
         self.started.set()
 
