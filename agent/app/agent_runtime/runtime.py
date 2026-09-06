@@ -717,12 +717,21 @@ class AgentRuntime:
                     )
                 )
 
+                # The execution-wide timeout belongs to the
+                # AgentRuntime. Convert the current remaining
+                # budget into an absolute monotonic deadline.
+                deadline = (
+                    time.monotonic()
+                    + remaining_timeout
+                )
+
                 inference_response = (
                     await asyncio.wait_for(
                         self.inference.complete(
                             model=selected_model,
                             messages=context.messages,
                             tools=tool_definitions,
+                            deadline=deadline,
                         ),
                         timeout=remaining_timeout,
                     )

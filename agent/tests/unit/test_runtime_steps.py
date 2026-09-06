@@ -16,6 +16,8 @@ from app.core.errors import (
 )
 from app.models.responses import ToolCallResult
 from app.tools.builtin import create_tool_registry
+
+
 class FakeRouter:
     async def route(
         self,
@@ -37,8 +39,9 @@ class FakeInference:
         self,
         responses: list[dict[str, Any]],
     ) -> None:
-        self.responses = responses
+        self.responses = list(responses)
         self.calls = 0
+        self.call_details: list[dict[str, Any]] = []
 
     async def complete(
         self,
@@ -46,9 +49,20 @@ class FakeInference:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        deadline: float | None = None,
     ) -> dict[str, Any]:
+        self.call_details.append(
+            {
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "deadline": deadline,
+            }
+        )
+
         response = self.responses[self.calls]
         self.calls += 1
+
         return response
 
 
@@ -60,7 +74,9 @@ class FakeSandbox:
     ) -> None:
         self.result = result
         self.error = error
-        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.calls: list[
+            tuple[str, dict[str, Any]]
+        ] = []
 
     async def execute(
         self,
@@ -160,10 +176,6 @@ async def test_final_response_creates_expected_step_trace() -> None:
 
     assert response.status == "success"
     assert response.answer == "The answer is 4."
-
-    # The runtime exposes the execution ID, but the response
-    # intentionally does not expose the complete execution object.
-    # Verify the public execution metadata first.
     assert response.steps == 1
 
 
@@ -257,6 +269,33 @@ async def test_runtime_records_step_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inference_receives_execution_deadline() -> None:
+    inference = FakeInference(
+        [
+            final_response(
+                "Done."
+            )
+        ]
+    )
+
+    runtime = create_runtime(
+        inference=inference,
+    )
+
+    await runtime.run(
+        "Do something."
+    )
+
+    assert inference.calls == 1
+    assert len(inference.call_details) == 1
+
+    deadline = inference.call_details[0]["deadline"]
+
+    assert deadline is not None
+    assert isinstance(deadline, float)
+
+
+@pytest.mark.asyncio
 async def test_tool_failure_is_propagated() -> None:
     inference = FakeInference(
         [
@@ -282,6 +321,7 @@ async def test_tool_failure_is_propagated() -> None:
         await runtime.run(
             "Calculate 2 + 2."
         )
+
 
 @pytest.mark.asyncio
 async def test_runtime_stops_after_max_steps() -> None:
@@ -315,7 +355,6 @@ async def test_runtime_stops_after_max_steps() -> None:
             "Keep calculating."
         )
 
-    # Exactly one inference iteration was permitted.
     assert inference.calls == 1
 
 
@@ -394,7 +433,6 @@ async def test_max_steps_allows_exactly_configured_iterations() -> None:
             "Keep calculating."
         )
 
-    # Exactly two inference iterations were permitted.
     assert inference.calls == 2
 
 
@@ -435,5 +473,4 @@ async def test_max_steps_failure_is_recorded_by_runtime() -> None:
         in str(exc_info.value).lower()
     )
 
-    # No second inference was started.
     assert inference.calls == 1

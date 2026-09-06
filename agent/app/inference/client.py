@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Any
 
 import httpx
 
+from app.agent_runtime.retry_policy import RetryPolicy
 from app.core.errors import (
     LLMConnectionError,
     LLMResponseError,
@@ -22,9 +25,11 @@ class InferenceClient:
         timeout: float = 120.0,
         max_connections: int = 100,
         max_keepalive_connections: int = 20,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.retry_policy = retry_policy or RetryPolicy()
 
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(
@@ -51,8 +56,83 @@ class InferenceClient:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Send a chat completion request to the inference layer."""
+        """
+        Send a chat completion request to the inference service.
+
+        Retries are bounded by both RetryPolicy and the optional
+        execution deadline.
+        """
+
+        for attempt in range(
+            1,
+            self.retry_policy.max_attempts + 1,
+        ):
+            try:
+                return await self._complete_once(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                )
+
+            except Exception as exc:
+                if not self.retry_policy.should_retry(
+                    error=exc,
+                    attempt=attempt,
+                ):
+                    raise
+
+                delay = self.retry_policy.get_delay(
+                    attempt=attempt,
+                )
+
+                if deadline is not None:
+                    remaining = (
+                        deadline - time.monotonic()
+                    )
+
+                    if remaining <= 0:
+                        logger.warning(
+                            "inference_retry_deadline_exceeded "
+                            "attempt=%s",
+                            attempt,
+                        )
+                        raise
+
+                    if delay >= remaining:
+                        logger.warning(
+                            "inference_retry_deadline_would_be_exceeded "
+                            "attempt=%s delay=%s remaining=%s",
+                            attempt,
+                            delay,
+                            remaining,
+                        )
+                        raise
+
+                logger.warning(
+                    "inference_retry_scheduled "
+                    "attempt=%s max_attempts=%s delay=%s error=%s",
+                    attempt,
+                    self.retry_policy.max_attempts,
+                    delay,
+                    type(exc).__name__,
+                )
+
+                await asyncio.sleep(delay)
+
+        raise RuntimeError(
+            "Inference retry loop exited unexpectedly"
+        )
+
+    async def _complete_once(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Execute exactly one inference request."""
 
         payload: dict[str, Any] = {
             "model": model,
@@ -149,6 +229,7 @@ class InferenceClient:
 
         try:
             data = response.json()
+
         except ValueError as exc:
             logger.error(
                 "inference_invalid_json_response "

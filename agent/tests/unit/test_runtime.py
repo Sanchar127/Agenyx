@@ -31,7 +31,7 @@ class FakeInference:
         self,
         responses: list[dict[str, Any]],
     ) -> None:
-        self.responses = responses
+        self.responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
     async def complete(
@@ -40,12 +40,14 @@ class FakeInference:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
                 "model": model,
                 "messages": messages,
                 "tools": tools,
+                "deadline": deadline,
             }
         )
 
@@ -66,6 +68,7 @@ class HangingInference:
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.cancelled = False
+        self.deadline: float | None = None
 
     async def complete(
         self,
@@ -73,7 +76,9 @@ class HangingInference:
         model: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        deadline: float | None = None,
     ) -> dict[str, Any]:
+        self.deadline = deadline
         self.started.set()
 
         try:
@@ -162,7 +167,7 @@ class FakePlanner:
         self,
         decisions: list[AgentDecision],
     ) -> None:
-        self.decisions = decisions
+        self.decisions = list(decisions)
         self.calls: list[dict[str, Any]] = []
 
     def plan(
@@ -388,6 +393,28 @@ async def test_agent_returns_final_answer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inference_receives_execution_deadline() -> None:
+    runtime, inference, _, _ = create_runtime(
+        [
+            final_response("Hello!"),
+        ]
+    )
+
+    result = await runtime.run(
+        "Say hello",
+    )
+
+    assert result.status == "success"
+
+    assert len(inference.calls) == 1
+
+    deadline = inference.calls[0]["deadline"]
+
+    assert deadline is not None
+    assert isinstance(deadline, float)
+
+
+@pytest.mark.asyncio
 async def test_agent_executes_tool_through_tool_executor() -> None:
     runtime, inference, _, sandbox = create_runtime(
         [
@@ -551,6 +578,7 @@ async def test_agent_hard_cancels_hanging_inference() -> None:
 
     assert inference.started.is_set() is True
     assert inference.cancelled is True
+    assert inference.deadline is not None
 
     assert sandbox.calls == []
 
@@ -637,7 +665,6 @@ async def test_agent_rejects_repeated_identical_tool_calls() -> None:
         )
 
     assert len(sandbox.calls) == 3
-
     assert len(inference.calls) == 4
 
 
@@ -1133,13 +1160,11 @@ async def test_runtime_cancel_active_inference_execution() -> None:
         )
     )
 
-    # Wait until inference is actually running.
     await asyncio.wait_for(
         hanging_inference.started.wait(),
         timeout=1.0,
     )
 
-    # Runtime should now have registered the execution.
     assert runtime._active_executions
 
     execution_id = next(
@@ -1162,9 +1187,9 @@ async def test_runtime_cancel_active_inference_execution() -> None:
     )
 
     assert hanging_inference.cancelled is True
+    assert hanging_inference.deadline is not None
 
     assert result.status == "cancelled"
-
     assert result.execution_id == execution_id
 
     assert runtime.is_active(
@@ -1172,7 +1197,6 @@ async def test_runtime_cancel_active_inference_execution() -> None:
     ) is False
 
     assert sandbox.calls == []
-
     assert len(router.calls) == 1
 
 
@@ -1197,7 +1221,6 @@ async def test_runtime_cancel_active_tool_execution() -> None:
         )
     )
 
-    # Wait until tool execution is actually running.
     await asyncio.wait_for(
         hanging_executor.started.wait(),
         timeout=1.0,
@@ -1227,7 +1250,6 @@ async def test_runtime_cancel_active_tool_execution() -> None:
     assert hanging_executor.cancelled is True
 
     assert result.status == "cancelled"
-
     assert result.execution_id == execution_id
 
     assert runtime.is_active(
@@ -1235,9 +1257,6 @@ async def test_runtime_cancel_active_tool_execution() -> None:
     ) is False
 
     assert len(inference.calls) == 1
-
-    # The fake sandbox must never be reached because the
-    # ToolExecutor itself was cancelled.
     assert sandbox.calls == []
 
 
@@ -1287,8 +1306,6 @@ async def test_runtime_cancel_cleans_up_active_execution() -> None:
 
     assert result.status == "cancelled"
 
-    # The finally block in Runtime must remove the
-    # execution from the active execution registry.
     assert runtime.is_active(
         execution_id,
     ) is False
@@ -1338,9 +1355,6 @@ async def test_runtime_cancel_same_execution_twice() -> None:
 
     assert result.status == "cancelled"
 
-    # The execution has already been removed.
-    # A second cancellation request must therefore
-    # return False.
     second_cancel = await runtime.cancel(
         execution_id,
     )
