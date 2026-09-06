@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import pytest
-import time
+
 from app.agent_runtime.cancellation import CancellationToken
 from app.agent_runtime.domain import (
     AgentDecision,
     DecisionType,
+    ExecutionContext,
+    ToolCall,
 )
 from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.planner import Planner
@@ -21,7 +24,12 @@ from app.core.errors import (
     ToolExecutionError,
 )
 from app.tools.builtin import create_tool_registry
-from app.tools.executor import ToolExecutor
+from app.tools.executor import ToolExecutor, ToolResult
+
+
+# ============================================================
+# Fakes
+# ============================================================
 
 
 class FakeInference:
@@ -217,6 +225,166 @@ class HangingToolExecutor:
             raise
 
 
+class DelayedToolExecutor:
+    """
+    Tool executor used to verify real parallel execution.
+
+    Each call waits for the configured delay and tracks
+    how many executions are active at the same time.
+    """
+
+    def __init__(
+        self,
+        *,
+        delay: float = 0.2,
+    ) -> None:
+        self.delay = delay
+        self.calls: list[str] = []
+
+        self.active = 0
+        self.max_active = 0
+
+    async def execute(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        context: ExecutionContext | None = None,
+    ) -> Any:
+        self.calls.append(name)
+
+        self.active += 1
+        self.max_active = max(
+            self.max_active,
+            self.active,
+        )
+
+        try:
+            await asyncio.sleep(self.delay)
+
+            return ToolResult(
+                success=True,
+                output=arguments["result"],
+            )
+        finally:
+            self.active -= 1
+
+
+class VariableDelayToolExecutor:
+    """
+    Tool executor with different delays per call.
+
+    Used to prove that execution may finish out of order while
+    Runtime preserves deterministic result ordering.
+    """
+
+    def __init__(
+        self,
+        delays: dict[str, float],
+    ) -> None:
+        self.delays = delays
+        self.calls: list[str] = []
+
+    async def execute(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        call_id = arguments["call_id"]
+
+        self.calls.append(call_id)
+
+        await asyncio.sleep(
+            self.delays[call_id]
+        )
+
+        return ToolResult(
+            success=True,
+            output=arguments["result"],
+        )
+
+
+class FailingToolExecutor:
+    """
+    Tool executor fake where one configured call fails while
+    sibling calls are allowed to complete.
+    """
+
+    def __init__(
+        self,
+        *,
+        failing_call_id: str,
+        delay: float = 0.05,
+    ) -> None:
+        self.failing_call_id = failing_call_id
+        self.delay = delay
+
+        self.calls: list[str] = []
+        self.completed: list[str] = []
+
+    async def execute(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        call_id = arguments["call_id"]
+
+        self.calls.append(call_id)
+
+        await asyncio.sleep(
+            self.delay
+        )
+
+        if call_id == self.failing_call_id:
+            raise ToolExecutionError(
+                f"Tool '{name}' failed"
+            )
+
+        self.completed.append(call_id)
+
+        return ToolResult(
+            success=True,
+            output=arguments["result"],
+        )
+
+
+class HangingParallelToolExecutor:
+    """
+    Tool executor fake that allows Runtime cancellation
+    to be tested across multiple parallel tool calls.
+    """
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.cancelled = 0
+        self.started_event = asyncio.Event()
+
+    async def execute(
+        self,
+        *,
+        name: str,
+        arguments: dict[str, Any],
+        context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        self.started += 1
+        self.started_event.set()
+
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+# ============================================================
+# Runtime factory
+# ============================================================
+
+
 def create_runtime(
     responses: list[dict[str, Any]],
     *,
@@ -231,8 +399,8 @@ def create_runtime(
     Create a fully wired AgentRuntime for unit tests.
 
     Planner, ToolExecutor, and Runtime intentionally receive
-    the same ToolRegistry instance so they operate against the
-    same registered tool definitions.
+    the same ToolRegistry instance so they operate against
+    the same registered tool definitions.
 
     The Runtime talks only to ToolExecutor. The ToolExecutor
     delegates actual execution to the fake sandbox.
@@ -273,11 +441,18 @@ def create_runtime(
     )
 
 
+# ============================================================
+# Response helpers
+# ============================================================
+
+
 def tool_call_response(
     name: str,
     arguments: str,
     call_id: str = "call-1",
 ) -> dict[str, Any]:
+    """Create a single-tool OpenAI-compatible inference response."""
+
     return {
         "choices": [
             {
@@ -303,6 +478,8 @@ def tool_call_response(
 def final_response(
     answer: str,
 ) -> dict[str, Any]:
+    """Create a final-answer OpenAI-compatible inference response."""
+
     return {
         "choices": [
             {
@@ -406,7 +583,6 @@ async def test_inference_receives_execution_deadline() -> None:
     )
 
     assert result.status == "success"
-
     assert len(inference.calls) == 1
 
     deadline = inference.calls[0]["deadline"]
@@ -440,11 +616,9 @@ async def test_agent_executes_tool_through_tool_executor() -> None:
     assert len(result.tool_calls) == 1
 
     assert result.tool_calls[0].name == "calculator"
-
     assert result.tool_calls[0].arguments == {
         "expression": "25 * 17",
     }
-
     assert result.tool_calls[0].result == "425"
 
     assert sandbox.calls == [
@@ -582,7 +756,6 @@ async def test_agent_hard_cancels_hanging_inference() -> None:
     assert inference.deadline is not None
 
     assert sandbox.calls == []
-
     assert len(router.calls) == 1
 
 
@@ -619,7 +792,6 @@ async def test_agent_hard_cancels_hanging_tool_execution() -> None:
     assert hanging_executor.cancelled is True
 
     assert len(inference.calls) == 1
-
     assert sandbox.calls == []
 
 
@@ -813,11 +985,8 @@ async def test_agent_passes_required_capabilities_to_router() -> None:
     assert result.status == "success"
 
     assert len(router.calls) == 1
-
     assert router.calls[0]["session_id"] == "session-123"
-
     assert router.calls[0]["task"] == "special task"
-
     assert router.calls[0]["required_capabilities"] == [
         "calculator",
     ]
@@ -859,7 +1028,6 @@ async def test_agent_uses_intent_as_task_when_task_missing() -> None:
     )
 
     assert len(router.calls) == 1
-
     assert router.calls[0]["task"] == (
         "Calculate something"
     )
@@ -1124,7 +1292,7 @@ async def test_agent_decision_fail_does_not_execute_tools() -> None:
 
 
 # ============================================================
-# Step 11 — Cancellation
+# Cancellation
 # ============================================================
 
 
@@ -1265,7 +1433,8 @@ async def test_runtime_cancel_active_tool_execution() -> None:
 async def test_runtime_cancel_cleans_up_active_execution() -> None:
     runtime, _, _, _ = create_runtime(
         [
-            final_response("unused"),
+            final_response("Tool calls requested."),
+            final_response("Done."),
         ]
     )
 
@@ -1320,7 +1489,8 @@ async def test_runtime_cancel_cleans_up_active_execution() -> None:
 async def test_runtime_cancel_same_execution_twice() -> None:
     runtime, _, _, _ = create_runtime(
         [
-            final_response("unused"),
+            final_response("Tool calls requested."),
+            final_response("Done."),
         ]
     )
 
@@ -1387,6 +1557,12 @@ async def test_completed_execution_is_no_longer_active() -> None:
 
     assert cancelled is False
 
+
+# ============================================================
+# Execution budget
+# ============================================================
+
+
 def test_remaining_timeout_uses_execution_budget() -> None:
     runtime = AgentRuntime.__new__(
         AgentRuntime
@@ -1399,10 +1575,11 @@ def test_remaining_timeout_uses_execution_budget() -> None:
     started_at = time.monotonic()
 
     remaining = runtime._remaining_timeout(
-        started_at
+        started_at,
     )
 
     assert 0.0 < remaining <= 10.0
+
 
 def test_remaining_timeout_raises_when_budget_exhausted() -> None:
     runtime = AgentRuntime.__new__(
@@ -1420,5 +1597,648 @@ def test_remaining_timeout_raises_when_budget_exhausted() -> None:
         match="exceeded timeout",
     ):
         runtime._remaining_timeout(
-            started_at
+            started_at,
         )
+
+
+# ============================================================
+# Step 18 — Parallel Tool Execution
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_agent_executes_multiple_tool_calls_in_parallel() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+            final_response("Done."),
+        ]
+    )
+
+    executor = DelayedToolExecutor(
+        delay=0.2,
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=3,
+        timeout_seconds=5.0,
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "result": "one",
+                        },
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "result": "two",
+                        },
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "result": "three",
+                        },
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+            AgentDecision(
+                type=DecisionType.FINAL,
+                content="All tools completed.",
+            ),
+        ]
+    )
+
+    started_at = time.monotonic()
+
+    result = await runtime.run(
+        "Execute three independent calculations",
+    )
+
+    elapsed = time.monotonic() - started_at
+
+    assert result.status == "success"
+    assert result.answer == "All tools completed."
+
+    assert len(result.tool_calls) == 3
+
+    assert executor.calls == [
+        "calculator",
+        "calculator",
+        "calculator",
+    ]
+
+    assert executor.max_active >= 2
+
+    assert elapsed < 0.5
+
+
+@pytest.mark.asyncio
+async def test_agent_respects_max_parallel_tool_calls() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+            final_response("Done."),
+        ]
+    )
+
+    executor = DelayedToolExecutor(
+        delay=0.2,
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=10,
+        timeout_seconds=5.0,
+        max_parallel_tool_calls=2,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=tuple(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "result": f"result-{i}",
+                        },
+                        call_id=f"call-{i}",
+                    )
+                    for i in range(5)
+                ),
+            ),
+            AgentDecision(
+                type=DecisionType.FINAL,
+                content="All tools completed.",
+            ),
+        ]
+    )
+
+    started_at = time.monotonic()
+
+    result = await runtime.run(
+        "Execute five independent calculations",
+    )
+
+    elapsed = time.monotonic() - started_at
+
+    assert result.status == "success"
+    assert len(result.tool_calls) == 5
+
+    assert executor.max_active == 2
+
+    # Five calls at 0.2 seconds with a concurrency limit of 2
+    # require three execution waves.
+    assert elapsed >= 0.45
+    assert elapsed < 1.0
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_batch_rejected_before_execution_when_global_budget_exceeded() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+        ]
+    )
+
+    executor = DelayedToolExecutor(
+        delay=0.01,
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=2,
+        max_repeated_tool_calls=10,
+        timeout_seconds=5.0,
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={"result": "one"},
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={"result": "two"},
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={"result": "three"},
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum tool calls",
+    ):
+        await runtime.run(
+            "Execute three tools",
+        )
+
+    assert executor.calls == []
+    assert executor.max_active == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_batch_rejected_before_execution_when_per_tool_limit_exceeded() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+        ]
+    )
+
+    executor = DelayedToolExecutor(
+        delay=0.01,
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=10,
+        timeout_seconds=5.0,
+        per_tool_limits={
+            "calculator": 2,
+        },
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={"result": "one"},
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={"result": "two"},
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={"result": "three"},
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="per-tool",
+    ):
+        await runtime.run(
+            "Execute three calculations",
+        )
+
+    assert executor.calls == []
+    assert executor.max_active == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_batch_rejected_before_execution_when_repeated_limit_exceeded() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+        ]
+    )
+
+    executor = DelayedToolExecutor(
+        delay=0.01,
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=3,
+        timeout_seconds=5.0,
+        max_parallel_tool_calls=4,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=tuple(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "expression": "1 + 1",
+                        },
+                        call_id=f"call-{i}",
+                    )
+                    for i in range(4)
+                ),
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="maximum repeated tool calls",
+    ):
+        await runtime.run(
+            "Execute repeated calculations",
+        )
+
+    assert executor.calls == []
+    assert executor.max_active == 0
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_results_preserve_planner_order() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+            final_response("Done."),
+        ]
+    )
+
+    executor = VariableDelayToolExecutor(
+        delays={
+            "call-1": 0.15,
+            "call-2": 0.01,
+            "call-3": 0.05,
+        }
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=10,
+        timeout_seconds=5.0,
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-1",
+                            "result": "one",
+                        },
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-2",
+                            "result": "two",
+                        },
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-3",
+                            "result": "three",
+                        },
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+            AgentDecision(
+                type=DecisionType.FINAL,
+                content="Done.",
+            ),
+        ]
+    )
+
+    result = await runtime.run(
+        "Execute three independent calculations",
+    )
+
+    assert result.status == "success"
+
+    assert [
+        call.call_id
+        for call in result.tool_calls
+    ] == [
+        "call-1",
+        "call-2",
+        "call-3",
+    ]
+
+    assert [
+        call.result
+        for call in result.tool_calls
+    ] == [
+        "one",
+        "two",
+        "three",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_failure_does_not_cancel_completed_siblings() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+        ]
+    )
+
+    executor = FailingToolExecutor(
+        failing_call_id="call-2",
+    )
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=10,
+        timeout_seconds=5.0,
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-1",
+                            "result": "one",
+                        },
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-2",
+                            "result": "two",
+                        },
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-3",
+                            "result": "three",
+                        },
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        ToolExecutionError,
+    ):
+        await runtime.run(
+            "Execute three tools",
+        )
+
+    assert executor.calls == [
+        "call-1",
+        "call-2",
+        "call-3",
+    ]
+
+    assert set(executor.completed) == {
+        "call-1",
+        "call-3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancel_cancels_parallel_tool_calls() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+        ]
+    )
+
+    executor = HangingParallelToolExecutor()
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=10,
+        timeout_seconds=10.0,
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-1",
+                        },
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-2",
+                        },
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-3",
+                        },
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+        ]
+    )
+
+    task = asyncio.create_task(
+        runtime.run(
+            "Run parallel tools",
+        )
+    )
+
+    await asyncio.wait_for(
+        executor.started_event.wait(),
+        timeout=1.0,
+    )
+
+    # Give the event loop enough time for all three admitted
+    # tool calls to start before cancellation.
+    await asyncio.sleep(0)
+
+    execution_id = next(
+        iter(runtime._active_executions)
+    )
+
+    cancelled = await runtime.cancel(
+        execution_id,
+    )
+
+    assert cancelled is True
+
+    result = await asyncio.wait_for(
+        task,
+        timeout=1.0,
+    )
+
+    assert result.status == "cancelled"
+
+    assert executor.started == 3
+    assert executor.cancelled == 3
+
+    assert runtime.is_active(
+        execution_id,
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_execution_respects_execution_timeout() -> None:
+    runtime, _, _, _ = create_runtime(
+        [
+            final_response("Tool calls requested."),
+        ]
+    )
+
+    executor = HangingParallelToolExecutor()
+
+    runtime.tool_executor = executor
+
+    runtime.limits = ExecutionLimits(
+        max_steps=8,
+        max_tool_calls=20,
+        max_repeated_tool_calls=10,
+        timeout_seconds=0.05,
+        max_parallel_tool_calls=3,
+    )
+
+    runtime.planner = FakePlanner(
+        [
+            AgentDecision(
+                type=DecisionType.TOOL_CALL,
+                tool_calls=(
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-1",
+                        },
+                        call_id="call-1",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-2",
+                        },
+                        call_id="call-2",
+                    ),
+                    ToolCall(
+                        name="calculator",
+                        arguments={
+                            "call_id": "call-3",
+                        },
+                        call_id="call-3",
+                    ),
+                ),
+            ),
+        ]
+    )
+
+    with pytest.raises(
+        ExecutionLimitExceeded,
+        match="tool execution exceeded execution timeout",
+    ):
+        await runtime.run(
+            "Run parallel tools forever",
+        )
+
+    assert executor.started == 3
+    assert executor.cancelled == 3

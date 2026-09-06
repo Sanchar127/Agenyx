@@ -7,6 +7,7 @@ from app.agent_runtime.domain import (
     AgentDecision,
     DecisionType,
     ExecutionContext,
+    ToolCall,
 )
 from app.core.errors import (
     AgentProtocolError,
@@ -26,7 +27,7 @@ class Planner:
     - validate the inference response structure
     - extract the assistant message
     - determine whether the model produced a final answer
-      or requested a tool
+      or requested tool execution
     - validate tool-call structure
     - safely parse tool arguments
     - verify requested tools exist
@@ -57,25 +58,10 @@ class Planner:
            AgentRuntime
                 |
                 v
+          ToolExecutor
+                |
+                v
              Sandbox
-
-    Error boundary:
-
-        Invalid inference/decision data
-                |
-                v
-        AgentProtocolError
-                |
-                v
-          DecisionError
-
-        Unexpected Planner failure
-                |
-                v
-           PlanningError
-                |
-                v
-           AgentError
     """
 
     def __init__(
@@ -94,8 +80,11 @@ class Planner:
         """
         Convert one inference response into one AgentDecision.
 
-        The Planner intentionally produces exactly one decision per
-        inference response.
+        A TOOL_CALL decision may contain one or more independent
+        tool calls.
+
+        Multiple tool calls are preserved as one domain decision
+        so the runtime can execute them concurrently.
 
         Supported decisions:
 
@@ -103,20 +92,11 @@ class Planner:
                 The model produced a final textual response.
 
             TOOL_CALL
-                The model requested one valid registered tool.
+                The model requested one or more valid tools.
 
-        CONTINUE and FAIL are part of the domain model and will be
-        introduced when the runtime has explicit semantics for them.
-
-        Error handling:
-
-        AgentProtocolError represents invalid or malformed inference
-        output. It is preserved for backward compatibility and is a
-        DecisionError through the Agenyx error hierarchy.
-
-        Any unexpected exception raised inside the Planner is converted
-        into PlanningError so callers do not need to understand Planner
-        implementation details.
+        CONTINUE and FAIL are part of the domain model and are
+        consumed by the runtime when explicitly produced by
+        future planning policies.
         """
 
         try:
@@ -124,28 +104,27 @@ class Planner:
 
             message = self._extract_message(response)
 
-            tool_calls = self._extract_tool_calls(message)
+            tool_calls = self._extract_tool_calls(
+                message
+            )
 
             if tool_calls:
-                return self._plan_tool_call(
-                    tool_calls[0],
+                return self._plan_tool_calls(
+                    tool_calls,
                     context=context,
                 )
 
-            return self._plan_final_response(message)
+            return self._plan_final_response(
+                message
+            )
 
         except AgentProtocolError:
-            # Invalid inference output or invalid decision structure.
-            #
-            # Keep the existing exception intact because it is already
-            # part of the Planner's public contract and inherits from
-            # DecisionError.
+            # Preserve protocol errors as part of the Planner's
+            # public contract.
             raise
 
         except Exception as exc:
-            # Any unexpected Planner failure is an internal planning
-            # failure. Do not leak implementation-specific exceptions
-            # such as KeyError, TypeError, RuntimeError, etc.
+            # Do not leak implementation-specific exceptions.
             raise PlanningError(
                 "Planner failed while creating an agent decision"
             ) from exc
@@ -156,12 +135,12 @@ class Planner:
     ) -> None:
         """
         Validate the minimum context required for planning.
-
-        ExecutionContext is intentionally validated at the Planner
-        boundary because future planning policies will depend on it.
         """
 
-        if not isinstance(context, ExecutionContext):
+        if not isinstance(
+            context,
+            ExecutionContext,
+        ):
             raise AgentProtocolError(
                 "Planner requires a valid ExecutionContext"
             )
@@ -183,20 +162,6 @@ class Planner:
         """
         Extract the assistant message from an OpenAI-compatible
         inference response.
-
-        Expected structure:
-
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": "...",
-                            "tool_calls": [...]
-                        }
-                    }
-                ]
-            }
         """
 
         if not isinstance(response, dict):
@@ -251,10 +216,12 @@ class Planner:
         message: dict[str, Any],
     ) -> list[dict[str, Any]]:
         """
-        Extract and validate the model's tool_calls field.
+        Extract and validate all model tool calls.
 
-        Missing tool_calls means the model is attempting to provide
-        a final response.
+        Missing tool_calls means the model is attempting to
+        provide a final response.
+
+        Multiple tool calls are valid and are preserved.
         """
 
         tool_calls = message.get("tool_calls")
@@ -267,32 +234,24 @@ class Planner:
                 "Inference message 'tool_calls' must be a list"
             )
 
-        if len(tool_calls) > 1:
-            raise AgentProtocolError(
-                "Inference returned multiple tool calls; "
-                "Agenyx currently supports exactly one "
-                "tool call per agent step"
-            )
-
         if not tool_calls:
             return []
 
-        tool_call = tool_calls[0]
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                raise AgentProtocolError(
+                    "Tool call must be an object"
+                )
 
-        if not isinstance(tool_call, dict):
-            raise AgentProtocolError(
-                "Tool call must be an object"
-            )
-
-        return [tool_call]
+        return tool_calls
 
     @staticmethod
     def _plan_final_response(
         message: dict[str, Any],
     ) -> AgentDecision:
         """
-        Convert an assistant message without a tool call into a
-        final AgentDecision.
+        Convert an assistant message without tool calls into
+        a final AgentDecision.
         """
 
         content = message.get("content")
@@ -319,39 +278,80 @@ class Planner:
             content=content,
         )
 
-    def _plan_tool_call(
+    def _plan_tool_calls(
         self,
-        tool_call: dict[str, Any],
+        tool_calls: list[dict[str, Any]],
         *,
         context: ExecutionContext,
     ) -> AgentDecision:
         """
-        Validate one model tool call and convert it into an
-        Agenyx AgentDecision.
+        Validate and convert all provider tool calls into
+        Agenyx-owned ToolCall objects.
+
+        The complete batch is validated before returning the
+        decision. This prevents the runtime from executing part
+        of a malformed batch.
+
+        Example:
+
+            model -> [A, B, C]
+
+        If B is invalid:
+
+            A -> not executed
+            B -> rejected
+            C -> not executed
         """
 
-        call_id = self._extract_call_id(tool_call)
+        planned_calls: list[ToolCall] = []
 
-        function = self._extract_function(tool_call)
+        for tool_call in tool_calls:
+            call_id = self._extract_call_id(
+                tool_call
+            )
 
-        name = self._extract_tool_name(function)
+            function = self._extract_function(
+                tool_call
+            )
 
-        arguments = self._extract_arguments(
-            function=function,
-            tool_name=name,
-        )
+            name = self._extract_tool_name(
+                function
+            )
 
-        self._validate_tool(
-            name=name,
-            arguments=arguments,
-            context=context,
-        )
+            arguments = self._extract_arguments(
+                function=function,
+                tool_name=name,
+            )
+
+            self._validate_tool(
+                name=name,
+                arguments=arguments,
+                context=context,
+            )
+
+            planned_calls.append(
+                ToolCall(
+                    name=name,
+                    arguments=arguments,
+                    call_id=call_id,
+                )
+            )
+
+        if not planned_calls:
+            raise AgentProtocolError(
+                "Planner produced an empty tool-call decision"
+            )
+
+        first_call = planned_calls[0]
 
         return AgentDecision(
             type=DecisionType.TOOL_CALL,
-            tool_name=name,
-            arguments=arguments,
-            call_id=call_id,
+            tool_calls=tuple(planned_calls),
+
+            # Backward compatibility.
+            tool_name=first_call.name,
+            arguments=first_call.arguments,
+            call_id=first_call.call_id,
         )
 
     @staticmethod
@@ -359,10 +359,7 @@ class Planner:
         tool_call: dict[str, Any],
     ) -> str:
         """
-        Extract the provider-generated tool call ID.
-
-        The ID is required because the subsequent tool result must
-        be correlated with the model's original tool request.
+        Extract the provider-generated tool-call ID.
         """
 
         call_id = tool_call.get("id")
@@ -390,7 +387,9 @@ class Planner:
         tool call.
         """
 
-        function = tool_call.get("function")
+        function = tool_call.get(
+            "function"
+        )
 
         if not isinstance(function, dict):
             raise AgentProtocolError(
@@ -430,25 +429,9 @@ class Planner:
         tool_name: str,
     ) -> dict[str, Any]:
         """
-        Parse the model's JSON-encoded tool arguments.
+        Parse JSON-encoded tool arguments.
 
-        Tool arguments must always decode into a JSON object.
-
-        Examples of valid arguments:
-
-            "{}"
-
-            '{"expression": "25 * 17"}'
-
-        Invalid:
-
-            '[]'
-
-            '"hello"'
-
-            '123'
-
-            'invalid json'
+        Tool arguments must decode into a JSON object.
         """
 
         raw_arguments = function.get(
@@ -456,10 +439,14 @@ class Planner:
             "{}",
         )
 
-        if not isinstance(raw_arguments, str):
+        if not isinstance(
+            raw_arguments,
+            str,
+        ):
             raise AgentProtocolError(
-                f"Invalid arguments for tool '{tool_name}': "
-                "arguments must be a JSON string"
+                f"Invalid arguments for tool "
+                f"'{tool_name}': arguments must be "
+                "a JSON string"
             )
 
         raw_arguments = raw_arguments.strip()
@@ -468,14 +455,19 @@ class Planner:
             raw_arguments = "{}"
 
         try:
-            arguments = json.loads(raw_arguments)
+            arguments = json.loads(
+                raw_arguments
+            )
         except json.JSONDecodeError as exc:
             raise AgentProtocolError(
                 f"Invalid JSON arguments for tool "
                 f"'{tool_name}'"
             ) from exc
 
-        if not isinstance(arguments, dict):
+        if not isinstance(
+            arguments,
+            dict,
+        ):
             raise AgentProtocolError(
                 f"Arguments for tool '{tool_name}' "
                 "must be a JSON object"
@@ -520,19 +512,19 @@ class Planner:
         """
         Basic argument validation.
 
-        The ToolRegistry currently owns the tool definitions but
-        does not yet expose a dedicated runtime schema validator.
+        The ToolRegistry currently does not expose a dedicated
+        runtime schema-validation interface.
 
-        Once the registry exposes a formal schema-validation
-        interface, this method should delegate to it.
-
-        For now we enforce the important invariant that arguments
-        are a dictionary and contain no obviously invalid structure.
+        Until that exists, arguments must be dictionaries.
         """
 
-        if not isinstance(arguments, dict):
+        if not isinstance(
+            arguments,
+            dict,
+        ):
             raise AgentProtocolError(
-                f"Arguments for tool '{name}' must be an object"
+                f"Arguments for tool '{name}' "
+                "must be an object"
             )
 
     @staticmethod
@@ -545,21 +537,12 @@ class Planner:
         """
         Context-aware policy boundary.
 
-        This is where execution policy will eventually live.
+        Runtime execution limits, authorization, idempotency,
+        deadlines, and sandbox restrictions remain enforcement
+        responsibilities of their respective layers.
 
-        Planned production policies include:
-
-        - maximum calls per execution
-        - per-tool call limits
-        - repeated-call detection
-        - tool budgets
-        - execution deadlines
-        - permission checks
-        - tenant/user authorization
-        - tool risk classification
-        - idempotency requirements
-        - sandbox restrictions
-        - failure-loop detection
+        The Planner only validates the context invariants that
+        are required for planning.
         """
 
         if context.current_step <= 0:
@@ -567,7 +550,6 @@ class Planner:
                 f"Invalid execution step for tool '{name}'"
             )
 
-        # Keep the interface explicit until policy components are
-        # introduced. These values will be consumed by future
-        # execution-policy validation.
+        # Keep the policy boundary explicit for future
+        # context-aware planning policies.
         _ = arguments

@@ -1,6 +1,7 @@
 from app.agent_runtime.domain.decision import (
     AgentDecision,
     DecisionType,
+    ToolCall,
 )
 from app.agent_runtime.domain.execution_state import ExecutionState
 from app.agent_runtime.domain.execution import Execution
@@ -14,6 +15,7 @@ from app.agent_runtime.domain.step_type import StepType
 __all__ = [
     "AgentDecision",
     "DecisionType",
+    "ToolCall",
     "Execution",
     "ExecutionResult",
     "ExecutionStatus",

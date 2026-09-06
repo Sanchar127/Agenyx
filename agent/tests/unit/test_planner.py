@@ -303,8 +303,7 @@ def test_plan_rejects_invalid_tool_calls_type(
             context=context,
         )
 
-
-def test_plan_rejects_multiple_tool_calls(
+def test_plan_accepts_multiple_tool_calls(
     planner: Planner,
     context: ExecutionContext,
 ) -> None:
@@ -334,15 +333,21 @@ def test_plan_rejects_multiple_tool_calls(
         ]
     }
 
-    with pytest.raises(
-        AgentProtocolError,
-        match="multiple tool calls",
-    ):
-        planner.plan(
-            response=response,
-            context=context,
-        )
+    decision = planner.plan(
+        response=response,
+        context=context,
+    )
 
+    assert decision.type is DecisionType.TOOL_CALL
+    assert len(decision.tool_calls) == 2
+
+    assert decision.tool_calls[0].call_id == "call_1"
+    assert decision.tool_calls[0].name == "calculator"
+    assert decision.tool_calls[0].arguments == {}
+
+    assert decision.tool_calls[1].call_id == "call_2"
+    assert decision.tool_calls[1].name == "calculator"
+    assert decision.tool_calls[1].arguments == {}
 
 def test_plan_rejects_invalid_tool_call(
     planner: Planner,

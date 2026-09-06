@@ -1,48 +1,69 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import time
+from dataclasses import dataclass, field
 
-from app.core.errors import (
-    AgentMaxStepsError,
-    ExecutionLimitExceeded,
-)
+from app.core.errors import ExecutionLimitExceeded
 
 
 @dataclass(frozen=True)
 class ExecutionLimits:
     """
-    Immutable execution policy for one AgentRuntime execution.
+    Immutable execution policy for one agent execution.
 
-    Limits currently supported:
+    ExecutionLimits owns the constraints that determine how much
+    work an execution is allowed to perform.
 
-    - maximum inference/execution steps
-    - maximum total tool calls
-    - maximum repeated identical tool calls
-    - maximum calls for an individual tool
-    - maximum total execution time
+    Limits:
+        max_steps:
+            Maximum number of reasoning/inference iterations.
+
+        max_tool_calls:
+            Maximum total number of tool executions.
+
+        max_repeated_tool_calls:
+            Maximum number of executions of the same tool with the
+            same arguments.
+
+        timeout_seconds:
+            Execution-wide wall-clock timeout.
+
+        per_tool_limits:
+            Optional individual limits for specific tools.
+
+        max_parallel_tool_calls:
+            Maximum number of tool executions that may run
+            concurrently from one model decision.
     """
 
     max_steps: int = 10
     max_tool_calls: int = 20
     max_repeated_tool_calls: int = 3
     timeout_seconds: float = 60.0
-    per_tool_limits: dict[str, int] = field(default_factory=dict)
+    per_tool_limits: dict[str, int] = field(
+        default_factory=dict
+    )
+    max_parallel_tool_calls: int = 4
 
     def __post_init__(self) -> None:
+        """
+        Validate execution-limit configuration.
+        """
+
         if self.max_steps <= 0:
             raise ValueError(
                 "max_steps must be greater than zero"
             )
 
-        if self.max_tool_calls < 0:
+        if self.max_tool_calls <= 0:
             raise ValueError(
-                "max_tool_calls cannot be negative"
+                "max_tool_calls must be greater than zero"
             )
 
         if self.max_repeated_tool_calls <= 0:
             raise ValueError(
-                "max_repeated_tool_calls must be greater than zero"
+                "max_repeated_tool_calls must be greater "
+                "than zero"
             )
 
         if self.timeout_seconds <= 0:
@@ -50,20 +71,22 @@ class ExecutionLimits:
                 "timeout_seconds must be greater than zero"
             )
 
+        if self.max_parallel_tool_calls <= 0:
+            raise ValueError(
+                "max_parallel_tool_calls must be greater "
+                "than zero"
+            )
+
         for tool_name, limit in self.per_tool_limits.items():
-            if not isinstance(tool_name, str) or not tool_name.strip():
+            if not tool_name:
                 raise ValueError(
-                    "per_tool_limits tool names must be non-empty strings"
+                    "per_tool_limits contains an empty tool name"
                 )
 
-            if not isinstance(limit, int):
+            if limit <= 0:
                 raise ValueError(
-                    "per_tool_limits values must be integers"
-                )
-
-            if limit < 0:
-                raise ValueError(
-                    "per_tool_limits values cannot be negative"
+                    "per-tool limit for "
+                    f"'{tool_name}' must be greater than zero"
                 )
 
     def validate_step(
@@ -71,11 +94,16 @@ class ExecutionLimits:
         step: int,
     ) -> None:
         """
-        Validate that a step is within the configured limit.
+        Validate that the requested reasoning step is allowed.
         """
 
+        if step <= 0:
+            raise ValueError(
+                "step must be greater than zero"
+            )
+
         if step > self.max_steps:
-            raise AgentMaxStepsError(
+            raise ExecutionLimitExceeded(
                 "Agent exceeded maximum steps: "
                 f"{self.max_steps}"
             )
@@ -85,11 +113,18 @@ class ExecutionLimits:
         tool_calls: int,
     ) -> None:
         """
-        Validate that another tool call is permitted.
+        Validate that another global tool execution is allowed.
 
-        `tool_calls` is the number of tool calls that have already
-        been executed.
+        Args:
+            tool_calls:
+                Number of tool executions that have already been
+                admitted/executed.
         """
+
+        if tool_calls < 0:
+            raise ValueError(
+                "tool_calls cannot be negative"
+            )
 
         if tool_calls >= self.max_tool_calls:
             raise ExecutionLimitExceeded(
@@ -102,14 +137,23 @@ class ExecutionLimits:
         repeated_calls: int,
     ) -> None:
         """
-        Validate that an identical tool call has not been repeated
-        beyond the configured limit.
+        Validate that another identical tool call is allowed.
 
-        `repeated_calls` is the number of times the same tool call
-        with the same arguments has already been executed.
+        Args:
+            repeated_calls:
+                Number of previous executions of the same tool with
+                the same arguments.
         """
 
-        if repeated_calls >= self.max_repeated_tool_calls:
+        if repeated_calls < 0:
+            raise ValueError(
+                "repeated_calls cannot be negative"
+            )
+
+        if (
+            repeated_calls
+            >= self.max_repeated_tool_calls
+        ):
             raise ExecutionLimitExceeded(
                 "Agent exceeded maximum repeated tool calls: "
                 f"{self.max_repeated_tool_calls}"
@@ -121,23 +165,43 @@ class ExecutionLimits:
         tool_calls: int,
     ) -> None:
         """
-        Validate that a specific tool has not exceeded its
-        configured call limit.
+        Validate that another call to a specific tool is permitted.
 
-        If no limit is configured for the tool, the call is allowed.
+        Tools without an entry in per_tool_limits have no individual
+        limit and remain subject to the global tool-call limit.
 
-        `tool_calls` is the number of times this specific tool has
-        already been executed.
+        Args:
+            tool_name:
+                Name of the tool being evaluated.
+
+            tool_calls:
+                Number of previous calls to this specific tool.
+
+        Raises:
+            ExecutionLimitExceeded:
+                If the configured per-tool limit is exhausted.
         """
 
-        limit = self.per_tool_limits.get(tool_name)
+        if not tool_name:
+            raise ValueError(
+                "tool_name cannot be empty"
+            )
+
+        if tool_calls < 0:
+            raise ValueError(
+                "tool_calls cannot be negative"
+            )
+
+        limit = self.per_tool_limits.get(
+            tool_name
+        )
 
         if limit is None:
             return
 
         if tool_calls >= limit:
             raise ExecutionLimitExceeded(
-                f"Agent exceeded maximum calls for tool "
+                "Agent exceeded per-tool limit for "
                 f"'{tool_name}': {limit}"
             )
 
@@ -146,9 +210,12 @@ class ExecutionLimits:
         started_at: float,
     ) -> None:
         """
-        Validate that the execution has not exceeded its time budget.
+        Validate the execution-wide timeout.
 
-        `started_at` must come from time.monotonic().
+        Args:
+            started_at:
+                Monotonic timestamp representing the beginning of
+                the execution.
         """
 
         elapsed = time.monotonic() - started_at
@@ -164,10 +231,13 @@ class ExecutionLimits:
         current_step: int,
     ) -> int:
         """
-        Return the number of execution steps remaining.
-
-        A value of zero means the step budget is exhausted.
+        Return the number of reasoning steps remaining.
         """
+
+        if current_step < 0:
+            raise ValueError(
+                "current_step cannot be negative"
+            )
 
         return max(
             self.max_steps - current_step,
@@ -180,10 +250,12 @@ class ExecutionLimits:
     ) -> int:
         """
         Return the number of global tool calls remaining.
-
-        A value of zero means the global tool-call budget
-        is exhausted.
         """
+
+        if tool_calls < 0:
+            raise ValueError(
+                "tool_calls cannot be negative"
+            )
 
         return max(
             self.max_tool_calls - tool_calls,
@@ -195,12 +267,17 @@ class ExecutionLimits:
         repeated_calls: int,
     ) -> int:
         """
-        Return the number of repeated calls remaining for
-        one identical tool invocation.
+        Return the number of repeated identical calls remaining.
         """
 
+        if repeated_calls < 0:
+            raise ValueError(
+                "repeated_calls cannot be negative"
+            )
+
         return max(
-            self.max_repeated_tool_calls - repeated_calls,
+            self.max_repeated_tool_calls
+            - repeated_calls,
             0,
         )
 
@@ -212,10 +289,27 @@ class ExecutionLimits:
         """
         Return the remaining calls for a specific tool.
 
-        Returns None when the tool has no configured limit.
+        Returns:
+            None:
+                The tool has no individual configured limit.
+
+            int:
+                Number of calls remaining.
         """
 
-        limit = self.per_tool_limits.get(tool_name)
+        if not tool_name:
+            raise ValueError(
+                "tool_name cannot be empty"
+            )
+
+        if tool_calls < 0:
+            raise ValueError(
+                "tool_calls cannot be negative"
+            )
+
+        limit = self.per_tool_limits.get(
+            tool_name
+        )
 
         if limit is None:
             return None
@@ -230,9 +324,7 @@ class ExecutionLimits:
         started_at: float,
     ) -> float:
         """
-        Return the remaining execution time in seconds.
-
-        Returns zero when the execution time budget is exhausted.
+        Return the remaining execution-wide timeout in seconds.
         """
 
         elapsed = time.monotonic() - started_at

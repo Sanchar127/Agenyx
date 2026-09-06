@@ -15,6 +15,7 @@ from app.agent_runtime.domain import (
     ExecutionState,
     Step,
     StepType,
+    ToolCall,
 )
 from app.agent_runtime.execution_limits import ExecutionLimits
 from app.agent_runtime.planner import Planner
@@ -28,7 +29,10 @@ from app.core.errors import (
 )
 from app.core.logging import logger
 from app.inference.client import InferenceClient
-from app.models.responses import AgentResponse, ToolCallResult
+from app.models.responses import (
+    AgentResponse,
+    ToolCallResult,
+)
 from app.router.client import SemanticRouterClient
 from app.sandbox.client import ToolSandboxClient
 from app.tools.executor import ToolExecutor
@@ -48,6 +52,21 @@ class _ActiveExecution:
     task: asyncio.Task[Any] | None = None
 
 
+@dataclass(frozen=True)
+class _ToolExecutionResult:
+    """
+    Internal result produced by one concurrently executed tool.
+
+    Concurrent tool execution does not mutate shared
+    ExecutionContext.
+
+    Results are applied later in deterministic model-request order.
+    """
+
+    tool_call: ToolCall
+    output: Any
+
+
 class AgentRuntime:
     """
     Orchestrates a complete agent execution.
@@ -59,6 +78,7 @@ class AgentRuntime:
     - call the inference service
     - interpret inference output through the Planner
     - execute requested tools
+    - execute independent tool calls concurrently
     - feed tool observations back into inference
     - enforce execution limits
     - support explicit execution cancellation
@@ -98,18 +118,35 @@ class AgentRuntime:
 
     defines the execution-wide wall-clock budget.
 
+        max_parallel_tool_calls = N
+
+    limits how many tool executions from one model decision may
+    execute concurrently.
+
     Explicit cancellation:
 
         await runtime.cancel(execution_id)
 
     requests cancellation for one currently running execution.
 
-    Timeout cancellation and explicit cancellation both cancel the
-    underlying asynchronous operation, but they remain semantically
-    distinct:
+    Timeout cancellation and explicit cancellation remain
+    semantically distinct:
 
         timeout      -> ExecutionLimitExceeded
         explicit     -> ExecutionCancelled
+
+    Parallel execution semantics:
+
+        - The Planner validates the complete tool-call batch.
+        - The runtime validates the complete batch against budgets.
+        - No tool starts until the complete batch is admitted.
+        - Independent admitted calls execute concurrently.
+        - Concurrency is bounded by max_parallel_tool_calls.
+        - The execution-wide timeout applies to the complete batch.
+        - Normal tool failure does not cancel sibling tool calls.
+        - Cancellation cancels all active sibling tool calls.
+        - Results are applied to ExecutionContext in original model
+          order.
     """
 
     def __init__(
@@ -126,10 +163,17 @@ class AgentRuntime:
         max_repeated_tool_calls: int = 3,
         timeout_seconds: float = 60.0,
         per_tool_limits: dict[str, int] | None = None,
+        max_parallel_tool_calls: int = 4,
     ) -> None:
         if max_steps <= 0:
             raise ValueError(
                 "max_steps must be greater than zero"
+            )
+
+        if max_parallel_tool_calls <= 0:
+            raise ValueError(
+                "max_parallel_tool_calls must be greater "
+                "than zero"
             )
 
         self.limits = ExecutionLimits(
@@ -140,6 +184,7 @@ class AgentRuntime:
             per_tool_limits=dict(
                 per_tool_limits or {}
             ),
+            max_parallel_tool_calls=max_parallel_tool_calls,
         )
 
         self.router = router
@@ -167,7 +212,7 @@ class AgentRuntime:
         #
         # This is intentionally local in-memory state for now.
         # Distributed execution/session persistence will be added
-        # later when Valkey/Redis-backed coordination is introduced.
+        # later.
         self._active_executions: dict[
             str,
             _ActiveExecution,
@@ -184,15 +229,6 @@ class AgentRuntime:
     ) -> AgentResponse:
         """
         Execute an agent request from start to finish.
-
-        Explicit cancellation can be requested using:
-
-            await runtime.cancel(execution_id)
-
-        while this execution is running.
-
-        Any failure is recorded on the Execution before being
-        propagated to the caller.
         """
 
         execution = Execution()
@@ -210,7 +246,9 @@ class AgentRuntime:
             task if task is not None else intent
         )
 
-        context.metadata["session_id"] = resolved_session_id
+        context.metadata["session_id"] = (
+            resolved_session_id
+        )
         context.metadata["task"] = resolved_task
 
         cancellation = CancellationToken()
@@ -260,13 +298,12 @@ class AgentRuntime:
 
             return self._to_agent_response(
                 result=result,
+                execution=execution,
                 context=context,
             )
 
         except ExecutionCancelled as exc:
-            context.add_error(
-                str(exc)
-            )
+            context.add_error(str(exc))
 
             if execution.state not in {
                 ExecutionState.COMPLETED,
@@ -292,23 +329,14 @@ class AgentRuntime:
 
             return self._to_agent_response(
                 result=result,
+                execution=execution,
                 context=context,
             )
 
         except asyncio.CancelledError as exc:
-            """
-            A direct asyncio task cancellation is treated as
-            explicit Agent cancellation.
-
-            This is intentionally converted into the Agent domain
-            cancellation semantics.
-            """
-
             cancellation.cancel()
 
-            error = (
-                "Agent execution was cancelled"
-            )
+            error = "Agent execution was cancelled"
 
             context.add_error(error)
 
@@ -336,18 +364,22 @@ class AgentRuntime:
 
             return self._to_agent_response(
                 result=result,
+                execution=execution,
                 context=context,
             )
 
         except Exception as exc:
-            execution.mark_failed(
-                error=str(exc),
-                error_type=type(exc).__name__,
-            )
+            if execution.state not in {
+                ExecutionState.COMPLETED,
+                ExecutionState.FAILED,
+                ExecutionState.CANCELLED,
+            }:
+                execution.mark_failed(
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
 
-            context.add_error(
-                str(exc)
-            )
+            context.add_error(str(exc))
 
             logger.exception(
                 "Agent execution failed",
@@ -372,16 +404,7 @@ class AgentRuntime:
         """
         Request cancellation of an active execution.
 
-        Returns:
-            True:
-                An active execution was found and cancellation
-                was requested.
-
-            False:
-                No active execution with the supplied ID exists.
-
-        Cancellation is intentionally idempotent. Calling cancel()
-        more than once is safe.
+        Cancellation is intentionally idempotent.
         """
 
         active_execution = (
@@ -397,10 +420,7 @@ class AgentRuntime:
 
         task = active_execution.task
 
-        if (
-            task is not None
-            and not task.done()
-        ):
+        if task is not None and not task.done():
             task.cancel()
 
         logger.info(
@@ -437,14 +457,7 @@ class AgentRuntime:
         started_at: float,
     ) -> float:
         """
-        Return the remaining execution timeout.
-
-        The timeout is an execution-wide budget rather than a
-        per-operation timeout.
-
-        Raises:
-            ExecutionLimitExceeded:
-                If the execution budget has already expired.
+        Return the remaining execution-wide timeout.
         """
 
         remaining = self.limits.remaining_timeout(
@@ -472,21 +485,6 @@ class AgentRuntime:
     ) -> str:
         """
         Execute the agent reasoning loop.
-
-        Returns:
-            Final answer generated by the agent.
-
-        Raises:
-            AgentMaxStepsError:
-                When the configured execution step limit is
-                exhausted without producing a final answer.
-
-            ExecutionLimitExceeded:
-                When the execution timeout or another execution
-                limit is exceeded.
-
-            ExecutionCancelled:
-                When explicit cancellation is requested.
         """
 
         execution_started_at = time.monotonic()
@@ -505,9 +503,7 @@ class AgentRuntime:
         # PLAN
         # =========================================================
 
-        self._check_cancellation(
-            cancellation
-        )
+        self._check_cancellation(cancellation)
 
         plan_step = self._start_step(
             execution=execution,
@@ -516,9 +512,7 @@ class AgentRuntime:
                 "intent": intent,
                 "task": task,
                 "session_id": session_id,
-                "required_capabilities": (
-                    required_capabilities
-                ),
+                "required_capabilities": required_capabilities,
             },
         )
 
@@ -545,9 +539,7 @@ class AgentRuntime:
 
         plan_step.mark_completed()
 
-        self._check_cancellation(
-            cancellation
-        )
+        self._check_cancellation(cancellation)
 
         self.limits.validate_timeout(
             execution_started_at
@@ -563,9 +555,7 @@ class AgentRuntime:
         # ROUTING
         # =========================================================
 
-        self._check_cancellation(
-            cancellation
-        )
+        self._check_cancellation(cancellation)
 
         self.limits.validate_timeout(
             execution_started_at
@@ -607,9 +597,7 @@ class AgentRuntime:
                 "Agent execution was cancelled during routing"
             ) from exc
 
-        self._check_cancellation(
-            cancellation
-        )
+        self._check_cancellation(cancellation)
 
         self.limits.validate_timeout(
             execution_started_at
@@ -617,13 +605,8 @@ class AgentRuntime:
 
         selected_model = route.model
 
-        context.metadata["model"] = (
-            selected_model
-        )
-
-        context.metadata["provider"] = (
-            route.provider
-        )
+        context.metadata["model"] = selected_model
+        context.metadata["provider"] = route.provider
 
         logger.info(
             "Agent request routed",
@@ -643,52 +626,25 @@ class AgentRuntime:
             1,
             self.limits.max_steps + 1,
         ):
-            # -----------------------------------------------------
-            # CANCELLATION
-            # -----------------------------------------------------
+            self._check_cancellation(cancellation)
 
-            self._check_cancellation(
-                cancellation
-            )
-
-            # -----------------------------------------------------
-            # STEP
-            # -----------------------------------------------------
-
-            context.current_step = (
-                step_number
-            )
+            context.current_step = step_number
 
             self.limits.validate_step(
                 step_number
             )
 
-            # -----------------------------------------------------
-            # TIMEOUT
-            # -----------------------------------------------------
-
             self.limits.validate_timeout(
                 execution_started_at
             )
 
-            # -----------------------------------------------------
-            # INFERENCE STATE
-            # -----------------------------------------------------
-
-            if (
-                execution.state
-                is not ExecutionState.INFERENCE
-            ):
+            if execution.state is not ExecutionState.INFERENCE:
                 execution.transition_to(
                     ExecutionState.INFERENCE
                 )
 
-            self._check_cancellation(
-                cancellation
-            )
-
             # -----------------------------------------------------
-            # INFERENCE STEP
+            # INFERENCE
             # -----------------------------------------------------
 
             inference_step = self._start_step(
@@ -711,9 +667,6 @@ class AgentRuntime:
                     )
                 )
 
-                # The execution-wide timeout belongs to the
-                # AgentRuntime. Convert the current remaining
-                # budget into an absolute monotonic deadline.
                 deadline = (
                     time.monotonic()
                     + remaining_timeout
@@ -743,7 +696,8 @@ class AgentRuntime:
 
             except asyncio.TimeoutError as exc:
                 error = (
-                    "Agent inference exceeded execution timeout: "
+                    "Agent inference exceeded execution "
+                    "timeout: "
                     f"{self.limits.timeout_seconds} seconds"
                 )
 
@@ -759,7 +713,8 @@ class AgentRuntime:
                 cancellation.cancel()
 
                 error = (
-                    "Agent execution was cancelled during inference"
+                    "Agent execution was cancelled "
+                    "during inference"
                 )
 
                 inference_step.mark_failed(
@@ -774,11 +729,10 @@ class AgentRuntime:
                 inference_step.mark_failed(
                     error=str(exc)
                 )
-
                 raise
 
             # -----------------------------------------------------
-            # TIMEOUT
+            # PLANNER
             # -----------------------------------------------------
 
             self.limits.validate_timeout(
@@ -789,10 +743,6 @@ class AgentRuntime:
                 cancellation
             )
 
-            # -----------------------------------------------------
-            # PLANNER
-            # -----------------------------------------------------
-
             decision = self.planner.plan(
                 response=inference_response,
                 context=context,
@@ -802,13 +752,22 @@ class AgentRuntime:
                 cancellation
             )
 
+            normalized_tool_calls = (
+                decision.normalized_tool_calls()
+            )
+
             logger.debug(
                 "Agent planner decision",
                 extra={
-                    "execution_id": str(execution.id),
+                    "execution_id": str(
+                        execution.id
+                    ),
                     "step": step_number,
                     "decision_type": str(
                         decision.type
+                    ),
+                    "tool_call_count": len(
+                        normalized_tool_calls
                     ),
                 },
             )
@@ -826,18 +785,13 @@ class AgentRuntime:
                     execution=execution,
                     step_type=StepType.FINAL,
                     input={
-                        "decision": (
-                            decision.type.value
-                        ),
+                        "decision": decision.type.value,
                     },
                 )
 
-                output = (
-                    decision.content or ""
-                )
+                output = decision.content or ""
 
                 final_step.output = output
-
                 final_step.mark_completed()
 
                 return output
@@ -850,17 +804,6 @@ class AgentRuntime:
                 self._check_cancellation(
                     cancellation
                 )
-
-                logger.info(
-                    "Agent requested another inference step",
-                    extra={
-                        "execution_id": str(
-                            execution.id
-                        ),
-                        "step": step_number,
-                    },
-                )
-
                 continue
 
             # =====================================================
@@ -871,17 +814,6 @@ class AgentRuntime:
                 error = (
                     decision.error
                     or "Agent returned a failure decision"
-                )
-
-                logger.error(
-                    "Agent planner returned failure",
-                    extra={
-                        "execution_id": str(
-                            execution.id
-                        ),
-                        "step": step_number,
-                        "error": error,
-                    },
                 )
 
                 raise RuntimeError(error)
@@ -895,7 +827,7 @@ class AgentRuntime:
                     cancellation
                 )
 
-                await self._execute_tool_call(
+                await self._execute_tool_calls(
                     execution=execution,
                     context=context,
                     inference_response=inference_response,
@@ -932,7 +864,7 @@ class AgentRuntime:
             f"{self.max_steps}"
         )
 
-    async def _execute_tool_call(
+    async def _execute_tool_calls(
         self,
         *,
         execution: Execution,
@@ -951,140 +883,191 @@ class AgentRuntime:
         cancellation: CancellationToken,
     ) -> None:
         """
-        Execute one tool call and append its observation
-        to context.
+        Execute one or more tool calls from a single model decision.
 
-        Policy order:
+        The complete batch is admitted before any tool starts.
 
-        1. cancellation
-        2. global tool-call limit
-        3. per-tool call limit
-        4. repeated identical call limit
-        5. timeout
-        6. ToolExecutor
+        Tool execution is bounded by
+        self.limits.max_parallel_tool_calls.
 
-        A cancelled or rejected call never reaches the
-        ToolExecutor/Sandbox.
+        Normal tool failure does not cancel sibling tool calls.
+
+        Explicit cancellation and execution timeout cancel the
+        entire active batch.
+
+        Results are applied to shared ExecutionContext sequentially
+        in original model order.
         """
 
-        # =========================================================
-        # CANCELLATION
-        # =========================================================
+        tool_calls = decision.normalized_tool_calls()
+
+        if not tool_calls:
+            raise AgentProtocolError(
+                "Tool decision contains no tool calls"
+            )
 
         self._check_cancellation(
             cancellation
         )
 
-        # =========================================================
-        # TOOL DATA
-        # =========================================================
+        # ---------------------------------------------------------
+        # Complete-batch admission.
+        # ---------------------------------------------------------
 
-        tool_name = decision.tool_name
-        call_id = decision.call_id
+        admissions: list[
+            tuple[
+                ToolCall,
+                tuple[str, str],
+            ]
+        ] = []
 
-        arguments = dict(
-            decision.arguments
-        )
-
-        # =========================================================
-        # VALIDATE TOOL CALL
-        # =========================================================
-
-        if not tool_name:
-            raise AgentProtocolError(
-                "Tool call is missing tool name"
-            )
-
-        if not call_id:
-            raise AgentProtocolError(
-                "Tool call is missing call_id"
-            )
-
-        if not self.tools.has(tool_name):
-            raise AgentProtocolError(
-                "Unknown tool requested by model: "
-                f"{tool_name}"
-            )
-
-        # =========================================================
-        # GLOBAL TOOL CALL LIMIT
-        # =========================================================
-
-        self.limits.validate_tool_call(
+        projected_global_calls = (
             context.tool_call_count
         )
 
-        # =========================================================
-        # PER-TOOL LIMIT
-        # =========================================================
+        projected_tool_counts = dict(
+            tool_call_counts
+        )
 
-        tool_call_count = (
-            tool_call_counts.get(
+        projected_repeated_calls = dict(
+            repeated_tool_calls
+        )
+
+        for tool_call in tool_calls:
+            self._check_cancellation(
+                cancellation
+            )
+
+            tool_name = tool_call.name
+            arguments = dict(
+                tool_call.arguments
+            )
+            call_id = tool_call.call_id
+
+            if not tool_name:
+                raise AgentProtocolError(
+                    "Tool call is missing tool name"
+                )
+
+            if not call_id:
+                raise AgentProtocolError(
+                    "Tool call is missing call_id"
+                )
+
+            if not self.tools.has(tool_name):
+                raise AgentProtocolError(
+                    "Unknown tool requested by model: "
+                    f"{tool_name}"
+                )
+
+            # -----------------------------------------------------
+            # Global budget.
+            # -----------------------------------------------------
+
+            self.limits.validate_tool_call(
+                projected_global_calls
+            )
+
+            # -----------------------------------------------------
+            # Per-tool budget.
+            # -----------------------------------------------------
+
+            current_tool_count = (
+                projected_tool_counts.get(
+                    tool_name,
+                    0,
+                )
+            )
+
+            self.limits.validate_per_tool_call(
                 tool_name,
-                0,
+                current_tool_count,
             )
-        )
 
-        self.limits.validate_per_tool_call(
-            tool_name,
-            tool_call_count,
-        )
+            # -----------------------------------------------------
+            # Repeated identical-call budget.
+            # -----------------------------------------------------
 
-        # =========================================================
-        # REPEATED TOOL CALL LIMIT
-        # =========================================================
-
-        tool_call_key = (
-            tool_name,
-            json.dumps(
-                arguments,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-        )
-
-        repeated_count = (
-            repeated_tool_calls.get(
-                tool_call_key,
-                0,
+            tool_call_key = (
+                tool_name,
+                json.dumps(
+                    arguments,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
             )
-        )
 
-        self.limits.validate_repeated_tool_call(
-            repeated_count
-        )
+            repeated_count = (
+                projected_repeated_calls.get(
+                    tool_call_key,
+                    0,
+                )
+            )
 
-        # =========================================================
-        # TIMEOUT
-        # =========================================================
+            self.limits.validate_repeated_tool_call(
+                repeated_count
+            )
 
-        self.limits.validate_timeout(
-            execution_started_at
-        )
+            self.limits.validate_timeout(
+                execution_started_at
+            )
 
-        # =========================================================
-        # REGISTER ATTEMPT
-        # =========================================================
+            # -----------------------------------------------------
+            # Reserve projected budget.
+            # -----------------------------------------------------
 
-        repeated_tool_calls[
-            tool_call_key
-        ] = repeated_count + 1
+            projected_global_calls += 1
 
-        tool_call_counts[
-            tool_name
-        ] = tool_call_count + 1
+            projected_tool_counts[
+                tool_name
+            ] = current_tool_count + 1
 
-        # =========================================================
-        # CANCELLATION
-        # =========================================================
+            projected_repeated_calls[
+                tool_call_key
+            ] = repeated_count + 1
 
-        self._check_cancellation(
-            cancellation
-        )
+            admissions.append(
+                (
+                    ToolCall(
+                        name=tool_name,
+                        arguments=arguments,
+                        call_id=call_id,
+                    ),
+                    tool_call_key,
+                )
+            )
 
-        # =========================================================
-        # ASSISTANT MESSAGE
-        # =========================================================
+        # ---------------------------------------------------------
+        # Commit budget counters only after the entire batch has
+        # passed admission.
+        # ---------------------------------------------------------
+
+        for tool_call, tool_call_key in admissions:
+            tool_name = tool_call.name
+
+            repeated_tool_calls[
+                tool_call_key
+            ] = (
+                repeated_tool_calls.get(
+                    tool_call_key,
+                    0,
+                )
+                + 1
+            )
+
+            tool_call_counts[
+                tool_name
+            ] = (
+                tool_call_counts.get(
+                    tool_name,
+                    0,
+                )
+                + 1
+            )
+
+        # ---------------------------------------------------------
+        # Add the assistant message once for the complete batch.
+        # ---------------------------------------------------------
 
         assistant_message = (
             self._extract_assistant_message(
@@ -1096,48 +1079,351 @@ class AgentRuntime:
             assistant_message
         )
 
-        # =========================================================
-        # TOOL CALL STEP
-        # =========================================================
+        # ---------------------------------------------------------
+        # Record tool-call steps before execution.
+        # ---------------------------------------------------------
 
-        tool_call_step = self._start_step(
-            execution=execution,
-            step_type=StepType.TOOL_CALL,
-            input={
-                "call_id": call_id,
-                "tool_name": tool_name,
-                "arguments": arguments,
-            },
-        )
+        for tool_call, _ in admissions:
+            self._check_cancellation(
+                cancellation
+            )
 
-        tool_call_step.output = {
-            "call_id": call_id,
-            "tool_name": tool_name,
-        }
+            step = self._start_step(
+                execution=execution,
+                step_type=StepType.TOOL_CALL,
+                input={
+                    "call_id": tool_call.call_id,
+                    "tool_name": tool_call.name,
+                    "arguments": dict(
+                        tool_call.arguments
+                    ),
+                },
+            )
 
-        tool_call_step.mark_completed()
+            step.output = {
+                "call_id": tool_call.call_id,
+                "tool_name": tool_call.name,
+            }
 
-        # =========================================================
-        # CANCELLATION
-        # =========================================================
+            step.mark_completed()
 
-        self._check_cancellation(
-            cancellation
-        )
-
-        # =========================================================
-        # TOOL EXECUTION STATE
-        # =========================================================
+        # ---------------------------------------------------------
+        # Execute concurrently.
+        # ---------------------------------------------------------
 
         execution.transition_to(
             ExecutionState.TOOL_EXECUTION
         )
 
+        semaphore = asyncio.Semaphore(
+            self.limits.max_parallel_tool_calls
+        )
+
+        async def execute_one(
+            tool_call: ToolCall,
+        ) -> _ToolExecutionResult:
+            async with semaphore:
+                self._check_cancellation(
+                    cancellation
+                )
+
+                output = await self._execute_single_tool(
+                    tool_call=tool_call,
+                    execution_started_at=(
+                        execution_started_at
+                    ),
+                    cancellation=cancellation,
+                )
+
+                return _ToolExecutionResult(
+                    tool_call=tool_call,
+                    output=output,
+                )
+
+        tasks = [
+            asyncio.create_task(
+                execute_one(tool_call)
+            )
+            for tool_call, _ in admissions
+        ]
+
+        try:
+            remaining_timeout = (
+                self._remaining_timeout(
+                    execution_started_at
+                )
+            )
+
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *tasks,
+                    return_exceptions=True,
+                ),
+                timeout=remaining_timeout,
+            )
+
+        except asyncio.TimeoutError as exc:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+            raise ExecutionLimitExceeded(
+                "Agent parallel tool execution exceeded "
+                "execution timeout: "
+                f"{self.limits.timeout_seconds} seconds"
+            ) from exc
+
+        except asyncio.CancelledError as exc:
+            cancellation.cancel()
+
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            await asyncio.gather(
+                *tasks,
+                return_exceptions=True,
+            )
+
+            raise ExecutionCancelled(
+                "Agent execution was cancelled during "
+                "parallel tool execution"
+            ) from exc
+
+        # ---------------------------------------------------------
+        # Validate collected results.
+        #
+        # gather(return_exceptions=True) intentionally allows
+        # sibling tools to finish even when one fails.
+        # ---------------------------------------------------------
+
+        if len(results) != len(admissions):
+            raise RuntimeError(
+                "Parallel tool execution returned an "
+                "unexpected number of results"
+            )
+
+        ordered_results: list[
+            _ToolExecutionResult | BaseException
+        ] = []
+
+        first_failure: BaseException | None = None
+
+        for index, result in enumerate(results):
+            expected_call = admissions[index][0]
+
+            if isinstance(
+                result,
+                _ToolExecutionResult,
+            ):
+                if (
+                    result.tool_call.call_id
+                    != expected_call.call_id
+                ):
+                    raise RuntimeError(
+                        "Parallel tool execution returned "
+                        "results in an unexpected order"
+                    )
+
+                ordered_results.append(
+                    result
+                )
+                continue
+
+            if isinstance(
+                result,
+                BaseException,
+            ):
+                if first_failure is None:
+                    first_failure = result
+
+                ordered_results.append(
+                    result
+                )
+                continue
+
+            raise RuntimeError(
+                "Parallel tool execution returned "
+                "an invalid result"
+            )
+
+        # ---------------------------------------------------------
+        # Apply successful results in original model order.
+        # ---------------------------------------------------------
+
+        execution.transition_to(
+            ExecutionState.OBSERVING
+        )
+
+        for result in ordered_results:
+            self._check_cancellation(
+                cancellation
+            )
+
+            if not isinstance(
+                result,
+                _ToolExecutionResult,
+            ):
+                continue
+
+            await self._record_tool_result(
+                execution=execution,
+                context=context,
+                tool_call=result.tool_call,
+                output=result.output,
+                cancellation=cancellation,
+            )
+
+        # ---------------------------------------------------------
+        # If one sibling failed, propagate the failure only after
+        # successful siblings have been recorded.
+        # ---------------------------------------------------------
+
+        if first_failure is not None:
+            if isinstance(
+                first_failure,
+                ExecutionCancelled,
+            ):
+                raise first_failure
+
+            if isinstance(
+                first_failure,
+                ExecutionLimitExceeded,
+            ):
+                raise first_failure
+
+            if isinstance(
+                first_failure,
+                asyncio.CancelledError,
+            ):
+                cancellation.cancel()
+
+                raise ExecutionCancelled(
+                    "Agent execution was cancelled during "
+                    "parallel tool execution"
+                ) from first_failure
+
+            raise first_failure
+
+    async def _execute_single_tool(
+        self,
+        *,
+        tool_call: ToolCall,
+        execution_started_at: float,
+        cancellation: CancellationToken,
+    ) -> Any:
+        """
+        Execute one already-admitted tool.
+
+        No shared ExecutionContext mutation happens here.
+
+        Cancellation is deliberately propagated unchanged.
+        The parallel batch coordinator owns conversion into the
+        Agent domain's ExecutionCancelled error.
+        """
+
         self._check_cancellation(
             cancellation
         )
 
-        tool_result_step = self._start_step(
+        remaining_timeout = (
+            self._remaining_timeout(
+                execution_started_at
+            )
+        )
+
+        try:
+            tool_result = await asyncio.wait_for(
+                self.tool_executor.execute(
+                    name=tool_call.name,
+                    arguments=dict(
+                        tool_call.arguments
+                    ),
+                    context=None,
+                ),
+                timeout=remaining_timeout,
+            )
+
+        except asyncio.TimeoutError as exc:
+            raise ExecutionLimitExceeded(
+                "Agent tool execution exceeded "
+                "execution timeout: "
+                f"{self.limits.timeout_seconds} seconds"
+            ) from exc
+
+        except asyncio.CancelledError:
+            raise
+
+        self._check_cancellation(
+            cancellation
+        )
+
+        self.limits.validate_timeout(
+            execution_started_at
+        )
+
+        if tool_result.failed:
+            error = (
+                tool_result.error
+                or (
+                    "Tool execution failed: "
+                    f"{tool_call.name}"
+                )
+            )
+
+            error_type = (
+                tool_result.metadata.get(
+                    "error_type"
+                )
+            )
+
+            if error_type == "unknown_tool":
+                raise AgentProtocolError(
+                    "Unknown tool requested by model: "
+                    f"{tool_call.name}"
+                )
+
+            raise ToolExecutionError(error)
+
+        return tool_result.output
+
+    async def _record_tool_result(
+        self,
+        *,
+        execution: Execution,
+        context: ExecutionContext,
+        tool_call: ToolCall,
+        output: Any,
+        cancellation: CancellationToken,
+    ) -> None:
+        """
+        Apply one completed tool result to execution state.
+
+        This method is called sequentially in model order after
+        concurrent execution has completed.
+        """
+
+        self._check_cancellation(
+            cancellation
+        )
+
+        call_id = tool_call.call_id
+        tool_name = tool_call.name
+        arguments = dict(
+            tool_call.arguments
+        )
+
+        if not call_id:
+            raise AgentProtocolError(
+                "Tool call is missing call_id"
+            )
+
+        result_step = self._start_step(
             execution=execution,
             step_type=StepType.TOOL_RESULT,
             input={
@@ -1147,152 +1433,20 @@ class AgentRuntime:
             },
         )
 
-        self.limits.validate_timeout(
-            execution_started_at
-        )
-
-        # =========================================================
-        # TOOL EXECUTION
-        # =========================================================
-
-        try:
-            remaining_timeout = (
-                self._remaining_timeout(
-                    execution_started_at
-                )
-            )
-
-            tool_result = await asyncio.wait_for(
-                self.tool_executor.execute(
-                name=tool_name,
-                arguments=arguments,
-                context=context,
-            ),
-                timeout=remaining_timeout,
-            )
-
-            self._check_cancellation(
-                cancellation
-            )
-
-        except asyncio.TimeoutError as exc:
-            error = (
-                "Agent tool execution exceeded execution timeout: "
-                f"{self.limits.timeout_seconds} seconds"
-            )
-
-            tool_result_step.mark_failed(
-                error=error
-            )
-
-            raise ExecutionLimitExceeded(
-                error
-            ) from exc
-
-        except asyncio.CancelledError as exc:
-            cancellation.cancel()
-
-            error = (
-                "Agent execution was cancelled during "
-                "tool execution"
-            )
-
-            tool_result_step.mark_failed(
-                error=error
-            )
-
-            raise ExecutionCancelled(
-                error
-            ) from exc
-
-        except Exception as exc:
-            tool_result_step.mark_failed(
-                error=str(exc)
-            )
-
-            raise
-
-        # =========================================================
-        # TIMEOUT + CANCELLATION
-        # =========================================================
-
-        self.limits.validate_timeout(
-            execution_started_at
-        )
-
-        self._check_cancellation(
-            cancellation
-        )
-
-        # =========================================================
-        # TOOL FAILURE
-        # =========================================================
-
-        if tool_result.failed:
-            error = (
-                tool_result.error
-                or f"Tool execution failed: {tool_name}"
-            )
-
-            error_type = (
-                tool_result.metadata.get(
-                    "error_type"
-                )
-            )
-
-            tool_result_step.mark_failed(
-                error=error
-            )
-
-            if error_type == "unknown_tool":
-                raise AgentProtocolError(
-                    "Unknown tool requested by model: "
-                    f"{tool_name}"
-                )
-
-            raise ToolExecutionError(
-                error
-            )
-
-        # =========================================================
-        # TOOL SUCCESS
-        # =========================================================
-
-        tool_result_step.output = (
-            tool_result.output
-        )
-
-        tool_result_step.mark_completed()
-
-        self._check_cancellation(
-            cancellation
-        )
+        result_step.output = output
+        result_step.mark_completed()
 
         context.add_tool_call(
             {
                 "id": call_id,
                 "name": tool_name,
                 "arguments": arguments,
-                "result": tool_result.output,
+                "result": output,
             }
         )
 
-        # =========================================================
-        # OBSERVATION
-        # =========================================================
-
-        execution.transition_to(
-            ExecutionState.OBSERVING
-        )
-
-        self._check_cancellation(
-            cancellation
-        )
-
-        observation = (
-            self._normalize_tool_output(
-                tool_result.output
-            )
+        observation = self._normalize_tool_output(
+            output
         )
 
         observation_step = self._start_step(
@@ -1305,20 +1459,11 @@ class AgentRuntime:
         )
 
         observation_step.output = observation
-
         observation_step.mark_completed()
 
         context.add_observation(
             observation
         )
-
-        self._check_cancellation(
-            cancellation
-        )
-
-        # =========================================================
-        # TOOL MESSAGE
-        # =========================================================
 
         context.add_message(
             {
@@ -1352,9 +1497,7 @@ class AgentRuntime:
 
         step.mark_started()
 
-        execution.add_step(
-            step
-        )
+        execution.add_step(step)
 
         return step
 
@@ -1402,10 +1545,8 @@ class AgentRuntime:
                         "Inference choice must be an object"
                     )
 
-                message = (
-                    first_choice.get(
-                        "message"
-                    )
+                message = first_choice.get(
+                    "message"
                 )
 
                 if isinstance(
@@ -1549,16 +1690,22 @@ class AgentRuntime:
     def _to_agent_response(
         *,
         result: ExecutionResult,
+        execution: Execution,
         context: ExecutionContext,
     ) -> AgentResponse:
         """
         Convert the internal execution result into the public
         API response model.
+
+        Tool-call ordering follows the order stored in the
+        ExecutionContext, preserving planner/model order even when
+        tools execute concurrently.
+
+        Step count is derived from the Execution domain object,
+        which owns the execution step history.
         """
 
-        tool_calls: list[
-            ToolCallResult
-        ] = []
+        tool_calls: list[ToolCallResult] = []
 
         for tool_call in context.tool_calls:
             if not isinstance(
@@ -1567,17 +1714,16 @@ class AgentRuntime:
             ):
                 continue
 
-            name = tool_call.get(
-                "name"
-            )
+            call_id = tool_call.get("id")
+            name = tool_call.get("name")
+            arguments = tool_call.get("arguments")
+            output = tool_call.get("result")
 
-            arguments = tool_call.get(
-                "arguments"
-            )
-
-            output = tool_call.get(
-                "result"
-            )
+            if not isinstance(
+                call_id,
+                str,
+            ):
+                continue
 
             if not isinstance(
                 name,
@@ -1593,6 +1739,7 @@ class AgentRuntime:
 
             tool_calls.append(
                 ToolCallResult(
+                    call_id=call_id,
                     name=name,
                     arguments=arguments,
                     result=AgentRuntime._normalize_tool_output(
@@ -1601,20 +1748,19 @@ class AgentRuntime:
                 )
             )
 
-        status = (
-            "success"
-            if result.succeeded
-            else str(result.status)
-        )
+        status = result.status.value
+
+        # Internal ExecutionStatus uses "completed",
+        # while the public AgentResponse contract uses "success".
+        if status == "completed":
+            status = "success"
 
         return AgentResponse(
-            execution_id=str(
-                result.execution_id
-            ),
+            execution_id=str(result.execution_id),
             status=status,
             answer=AgentRuntime._normalize_tool_output(
                 result.output
             ),
-            steps=context.current_step,
+            steps=len(execution.steps),
             tool_calls=tool_calls,
         )
