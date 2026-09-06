@@ -3,7 +3,10 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from app.core.errors import ExecutionLimitExceeded
+from app.core.errors import (
+    AgentMaxStepsError,
+    ExecutionLimitExceeded,
+)
 
 
 @dataclass(frozen=True)
@@ -31,18 +34,26 @@ class ExecutionLimits:
         per_tool_limits:
             Optional individual limits for specific tools.
 
+            A value of zero means the tool is disabled for this
+            execution.
+
         max_parallel_tool_calls:
             Maximum number of tool executions that may run
             concurrently from one model decision.
     """
 
     max_steps: int = 10
+
     max_tool_calls: int = 20
+
     max_repeated_tool_calls: int = 3
+
     timeout_seconds: float = 60.0
+
     per_tool_limits: dict[str, int] = field(
         default_factory=dict
     )
+
     max_parallel_tool_calls: int = 4
 
     def __post_init__(self) -> None:
@@ -83,10 +94,9 @@ class ExecutionLimits:
                     "per_tool_limits contains an empty tool name"
                 )
 
-            if limit <= 0:
+            if limit < 0:
                 raise ValueError(
-                    "per-tool limit for "
-                    f"'{tool_name}' must be greater than zero"
+                    "per_tool_limits values cannot be negative"
                 )
 
     def validate_step(
@@ -103,7 +113,7 @@ class ExecutionLimits:
             )
 
         if step > self.max_steps:
-            raise ExecutionLimitExceeded(
+            raise AgentMaxStepsError(
                 "Agent exceeded maximum steps: "
                 f"{self.max_steps}"
             )
@@ -118,7 +128,7 @@ class ExecutionLimits:
         Args:
             tool_calls:
                 Number of tool executions that have already been
-                admitted/executed.
+                admitted or executed.
         """
 
         if tool_calls < 0:
@@ -150,10 +160,7 @@ class ExecutionLimits:
                 "repeated_calls cannot be negative"
             )
 
-        if (
-            repeated_calls
-            >= self.max_repeated_tool_calls
-        ):
+        if repeated_calls >= self.max_repeated_tool_calls:
             raise ExecutionLimitExceeded(
                 "Agent exceeded maximum repeated tool calls: "
                 f"{self.max_repeated_tool_calls}"
@@ -169,6 +176,9 @@ class ExecutionLimits:
 
         Tools without an entry in per_tool_limits have no individual
         limit and remain subject to the global tool-call limit.
+
+        A per-tool limit of zero means the tool is completely
+        disabled for this execution.
 
         Args:
             tool_name:
@@ -201,8 +211,9 @@ class ExecutionLimits:
 
         if tool_calls >= limit:
             raise ExecutionLimitExceeded(
-                "Agent exceeded per-tool limit for "
-                f"'{tool_name}': {limit}"
+                "Agent exceeded maximum calls for tool "
+                f"'{tool_name}': {limit} "
+                "(per-tool limit exceeded)"
             )
 
     def validate_timeout(
@@ -276,8 +287,7 @@ class ExecutionLimits:
             )
 
         return max(
-            self.max_repeated_tool_calls
-            - repeated_calls,
+            self.max_repeated_tool_calls - repeated_calls,
             0,
         )
 

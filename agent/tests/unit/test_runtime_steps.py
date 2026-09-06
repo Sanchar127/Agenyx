@@ -218,6 +218,7 @@ async def test_tool_execution_creates_expected_step_sequence() -> None:
 
     assert response.tool_calls == [
         ToolCallResult(
+            call_id="call_1",
             name="calculator",
             arguments={
                 "expression": "2 + 2",

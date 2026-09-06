@@ -6,9 +6,12 @@ from pydantic import BaseModel, Field
 class ToolCallResult(BaseModel):
     """
     Represents the result of an individual tool call.
+
+    call_id is optional for backward compatibility with older
+    single-tool responses that did not expose a call identifier.
     """
 
-    call_id: str
+    call_id: str | None = None
 
     name: str
 

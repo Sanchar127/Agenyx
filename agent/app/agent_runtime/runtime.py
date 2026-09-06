@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agent_runtime.cancellation import CancellationToken
+from app.agent_runtime.context_manager import (
+    ContextBudget,
+    ContextManager,
+)
 from app.agent_runtime.domain import (
     AgentDecision,
     Execution,
@@ -73,7 +77,9 @@ class AgentRuntime:
 
     Responsibilities:
     - create and manage execution state
-    - build the execution context
+    - create and manage ExecutionContext
+    - manage LLM-facing context through ContextManager
+    - enforce context-window/token budgets
     - route the request to an appropriate model
     - call the inference service
     - interpret inference output through the Planner
@@ -88,6 +94,19 @@ class AgentRuntime:
 
     The runtime communicates with the separate InferenceClient
     abstraction.
+
+    Context management:
+
+        ExecutionContext
+            owns execution state/history.
+
+        ContextManager
+            owns LLM-facing context construction and token
+            management.
+
+    The complete ExecutionContext history is preserved, while
+    ContextManager creates a bounded inference view when the
+    configured context budget is exceeded.
 
     Execution limits:
 
@@ -123,6 +142,21 @@ class AgentRuntime:
     limits how many tool executions from one model decision may
     execute concurrently.
 
+    Context limits:
+
+        max_context_tokens = N
+
+    defines the maximum input context budget.
+
+        reserved_output_tokens = N
+
+    reserves part of the model context window for generated output.
+
+    Therefore:
+
+        available_input_tokens =
+            max_context_tokens - reserved_output_tokens
+
     Explicit cancellation:
 
         await runtime.cancel(execution_id)
@@ -144,7 +178,7 @@ class AgentRuntime:
         - Concurrency is bounded by max_parallel_tool_calls.
         - The execution-wide timeout applies to the complete batch.
         - Normal tool failure does not cancel sibling tool calls.
-        - Cancellation cancels all active sibling tool calls.
+        - Cancellation cancels all active sibling calls.
         - Results are applied to ExecutionContext in original model
           order.
     """
@@ -164,6 +198,8 @@ class AgentRuntime:
         timeout_seconds: float = 60.0,
         per_tool_limits: dict[str, int] | None = None,
         max_parallel_tool_calls: int = 4,
+        max_context_tokens: int | None = None,
+        reserved_output_tokens: int = 0,
     ) -> None:
         if max_steps <= 0:
             raise ValueError(
@@ -174,6 +210,26 @@ class AgentRuntime:
             raise ValueError(
                 "max_parallel_tool_calls must be greater "
                 "than zero"
+            )
+
+        if max_context_tokens is not None and max_context_tokens <= 0:
+            raise ValueError(
+                "max_context_tokens must be greater "
+                "than zero when provided"
+            )
+
+        if reserved_output_tokens < 0:
+            raise ValueError(
+                "reserved_output_tokens cannot be negative"
+            )
+
+        if (
+            max_context_tokens is not None
+            and reserved_output_tokens >= max_context_tokens
+        ):
+            raise ValueError(
+                "reserved_output_tokens must be smaller "
+                "than max_context_tokens"
             )
 
         self.limits = ExecutionLimits(
@@ -208,6 +264,14 @@ class AgentRuntime:
                 sandbox=sandbox,
             )
 
+        if max_context_tokens is None:
+            self.context_budget: ContextBudget | None = None
+        else:
+            self.context_budget = ContextBudget(
+                max_context_tokens=max_context_tokens,
+                reserved_output_tokens=reserved_output_tokens,
+            )
+
         # Execution ID -> active runtime state.
         #
         # This is intentionally local in-memory state for now.
@@ -236,6 +300,11 @@ class AgentRuntime:
         context = ExecutionContext(
             execution=execution,
             metadata=dict(metadata or {}),
+        )
+
+        context_manager = ContextManager(
+            context,
+            budget=self.context_budget,
         )
 
         resolved_session_id = (
@@ -278,6 +347,7 @@ class AgentRuntime:
             output = await self._execute(
                 execution=execution,
                 context=context,
+                context_manager=context_manager,
                 intent=intent,
                 session_id=resolved_session_id,
                 task=resolved_task,
@@ -477,6 +547,7 @@ class AgentRuntime:
         *,
         execution: Execution,
         context: ExecutionContext,
+        context_manager: ContextManager,
         intent: str,
         session_id: str,
         task: str,
@@ -485,6 +556,10 @@ class AgentRuntime:
     ) -> str:
         """
         Execute the agent reasoning loop.
+
+        ExecutionContext remains the source of execution state.
+
+        ContextManager is the source of all LLM-facing messages.
         """
 
         execution_started_at = time.monotonic()
@@ -516,18 +591,12 @@ class AgentRuntime:
             },
         )
 
-        context.add_message(
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            }
+        context_manager.add_system_message(
+            SYSTEM_PROMPT
         )
 
-        context.add_message(
-            {
-                "role": "user",
-                "content": intent,
-            }
+        context_manager.add_user_message(
+            intent
         )
 
         context.current_plan = task
@@ -568,11 +637,15 @@ class AgentRuntime:
                 )
             )
 
+            routing_messages = (
+                context_manager.get_messages_for_inference()
+            )
+
             route = await asyncio.wait_for(
                 self.router.route(
                     session_id=session_id,
                     task=task,
-                    messages=context.messages,
+                    messages=routing_messages,
                     required_capabilities=(
                         required_capabilities
                     ),
@@ -644,6 +717,14 @@ class AgentRuntime:
                 )
 
             # -----------------------------------------------------
+            # BUILD BOUNDED INFERENCE CONTEXT
+            # -----------------------------------------------------
+
+            inference_messages = (
+                context_manager.get_messages_for_inference()
+            )
+
+            # -----------------------------------------------------
             # INFERENCE
             # -----------------------------------------------------
 
@@ -653,10 +734,20 @@ class AgentRuntime:
                 input={
                     "model": selected_model,
                     "messages": list(
-                        context.messages
+                        inference_messages
                     ),
                     "tools": tool_definitions,
                     "step": step_number,
+                    "context_tokens": (
+                        context_manager.token_count(
+                            inference_messages
+                        )
+                    ),
+                    "remaining_input_tokens": (
+                        context_manager.remaining_input_tokens(
+                            inference_messages
+                        )
+                    ),
                 },
             )
 
@@ -676,7 +767,7 @@ class AgentRuntime:
                     await asyncio.wait_for(
                         self.inference.complete(
                             model=selected_model,
-                            messages=context.messages,
+                            messages=inference_messages,
                             tools=tool_definitions,
                             deadline=deadline,
                         ),
@@ -830,6 +921,7 @@ class AgentRuntime:
                 await self._execute_tool_calls(
                     execution=execution,
                     context=context,
+                    context_manager=context_manager,
                     inference_response=inference_response,
                     decision=decision,
                     execution_started_at=(
@@ -869,6 +961,7 @@ class AgentRuntime:
         *,
         execution: Execution,
         context: ExecutionContext,
+        context_manager: ContextManager,
         inference_response: Any,
         decision: AgentDecision,
         execution_started_at: float,
@@ -1067,6 +1160,11 @@ class AgentRuntime:
 
         # ---------------------------------------------------------
         # Add the assistant message once for the complete batch.
+        #
+        # IMPORTANT:
+        # This goes through ContextManager so that the complete
+        # assistant tool-call message becomes part of the
+        # managed LLM context.
         # ---------------------------------------------------------
 
         assistant_message = (
@@ -1075,7 +1173,7 @@ class AgentRuntime:
             )
         )
 
-        context.add_message(
+        context_manager.add_assistant_message(
             assistant_message
         )
 
@@ -1197,9 +1295,6 @@ class AgentRuntime:
 
         # ---------------------------------------------------------
         # Validate collected results.
-        #
-        # gather(return_exceptions=True) intentionally allows
-        # sibling tools to finish even when one fails.
         # ---------------------------------------------------------
 
         if len(results) != len(admissions):
@@ -1274,6 +1369,7 @@ class AgentRuntime:
             await self._record_tool_result(
                 execution=execution,
                 context=context,
+                context_manager=context_manager,
                 tool_call=result.tool_call,
                 output=result.output,
                 cancellation=cancellation,
@@ -1344,7 +1440,7 @@ class AgentRuntime:
                     arguments=dict(
                         tool_call.arguments
                     ),
-                    context=None,
+                        context=None,
                 ),
                 timeout=remaining_timeout,
             )
@@ -1397,6 +1493,7 @@ class AgentRuntime:
         *,
         execution: Execution,
         context: ExecutionContext,
+        context_manager: ContextManager,
         tool_call: ToolCall,
         output: Any,
         cancellation: CancellationToken,
@@ -1406,6 +1503,10 @@ class AgentRuntime:
 
         This method is called sequentially in model order after
         concurrent execution has completed.
+
+        ExecutionContext receives execution history.
+
+        ContextManager receives the LLM-facing tool message.
         """
 
         self._check_cancellation(
@@ -1436,7 +1537,8 @@ class AgentRuntime:
         result_step.output = output
         result_step.mark_completed()
 
-        context.add_tool_call(
+        # Execution history.
+        context_manager.add_tool_call(
             {
                 "id": call_id,
                 "name": tool_name,
@@ -1461,17 +1563,16 @@ class AgentRuntime:
         observation_step.output = observation
         observation_step.mark_completed()
 
-        context.add_observation(
+        # Execution history.
+        context_manager.add_observation(
             observation
         )
 
-        context.add_message(
-            {
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": tool_name,
-                "content": observation,
-            }
+        # LLM-facing context.
+        context_manager.add_tool_message(
+            call_id=call_id,
+            name=tool_name,
+            content=observation,
         )
 
         self._check_cancellation(
@@ -1487,6 +1588,10 @@ class AgentRuntime:
     ) -> Step:
         """
         Create, start, and attach a new execution step.
+
+        These steps represent the detailed internal execution
+        trace and are intentionally more granular than the public
+        reasoning-step count returned by AgentResponse.
         """
 
         step = Step(
@@ -1608,7 +1713,7 @@ class AgentRuntime:
             message,
             dict,
         ):
-            return message
+            return dict(message)
 
         if hasattr(
             message,
@@ -1701,8 +1806,17 @@ class AgentRuntime:
         ExecutionContext, preserving planner/model order even when
         tools execute concurrently.
 
-        Step count is derived from the Execution domain object,
-        which owns the execution step history.
+        The internal Execution object maintains a detailed step
+        trace containing PLAN, INFERENCE, TOOL_CALL, TOOL_RESULT,
+        OBSERVATION, and FINAL steps.
+
+        The public AgentResponse.steps field has a different
+        semantic meaning: it represents the number of reasoning/
+        inference iterations performed by the agent.
+
+        Therefore the public step count comes from
+        ExecutionContext.current_step rather than
+        len(execution.steps).
         """
 
         tool_calls: list[ToolCallResult] = []
@@ -1761,6 +1875,6 @@ class AgentRuntime:
             answer=AgentRuntime._normalize_tool_output(
                 result.output
             ),
-            steps=len(execution.steps),
+            steps=context.current_step,
             tool_calls=tool_calls,
         )
