@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent_runtime.persistence.models import (
@@ -23,17 +25,18 @@ from app.db.session import engine
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
+
 @pytest_asyncio.fixture
 async def db_session() -> AsyncSession:
     """
     Provide an isolated PostgreSQL session for each test.
 
-    The test runs inside an explicit database transaction.
-    The transaction is always rolled back after the test,
-    ensuring that test data never persists.
+    Each test receives its own explicit database transaction.
+    The transaction is rolled back after the test so no test
+    data persists in PostgreSQL.
 
-    The SQLAlchemy engine pool is disposed before and after
-    each test so asyncpg connections cannot leak across
+    The engine pool is disposed before and after each test to
+    prevent asyncpg connections from being reused across
     pytest event-loop boundaries.
     """
     await engine.dispose()
@@ -48,10 +51,7 @@ async def db_session() -> AsyncSession:
 
         try:
             yield session
-
         finally:
-            # Roll back the transaction while it is still
-            # associated with the connection.
             if transaction.is_active:
                 await transaction.rollback()
 
@@ -60,20 +60,31 @@ async def db_session() -> AsyncSession:
     await engine.dispose()
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def dispose_database_pool():
+async def create_test_execution(
+    db_session: AsyncSession,
+    execution_id: UUID,
+) -> ExecutionRecord:
     """
-    Prevent asyncpg connections from surviving across
-    pytest event loops.
-
-    This only affects integration tests.
-    Production continues using the normal SQLAlchemy pool.
+    Create a parent execution required by steps, results, and events.
     """
-    await engine.dispose()
+    now = datetime.now(timezone.utc)
 
-    yield
+    execution = ExecutionRecord(
+        execution_id=execution_id,
+        state="running",
+        status="running",
+        created_at=now,
+    )
 
-    await engine.dispose()
+    store = PostgreSQLExecutionStore(db_session)
+    await store.create(execution)
+
+    return execution
+
+
+# ---------------------------------------------------------------------------
+# Execution Store
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -81,25 +92,25 @@ async def test_execution_store_create_and_get(
     db_session: AsyncSession,
 ) -> None:
     execution_id = uuid4()
-    created_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
 
     execution = ExecutionRecord(
         execution_id=execution_id,
         state="running",
         status="running",
-        metadata={"source": "integration-test"},
-        created_at=created_at,
-        started_at=created_at,
+        metadata={"source": "test"},
+        created_at=now,
+        started_at=now,
         steps=(
             StepRecord(
                 step_id=uuid4(),
                 number=1,
-                type="tool",
+                type="tool_call",
                 status="completed",
-                input={"query": "hello"},
-                output={"result": "world"},
-                started_at=created_at,
-                completed_at=created_at,
+                input={"tool": "calculator"},
+                output={"result": 42},
+                started_at=now,
+                completed_at=now,
             ),
         ),
     )
@@ -114,14 +125,24 @@ async def test_execution_store_create_and_get(
     assert loaded.execution_id == execution_id
     assert loaded.state == "running"
     assert loaded.status == "running"
-    assert loaded.metadata == {"source": "integration-test"}
+    assert loaded.metadata == {"source": "test"}
 
     assert len(loaded.steps) == 1
     assert loaded.steps[0].number == 1
-    assert loaded.steps[0].type == "tool"
-    assert loaded.steps[0].status == "completed"
-    assert loaded.steps[0].input == {"query": "hello"}
-    assert loaded.steps[0].output == {"result": "world"}
+    assert loaded.steps[0].type == "tool_call"
+    assert loaded.steps[0].input == {"tool": "calculator"}
+    assert loaded.steps[0].output == {"result": 42}
+
+
+@pytest.mark.asyncio
+async def test_execution_store_get_returns_none_for_missing_execution(
+    db_session: AsyncSession,
+) -> None:
+    store = PostgreSQLExecutionStore(db_session)
+
+    loaded = await store.get(uuid4())
+
+    assert loaded is None
 
 
 @pytest.mark.asyncio
@@ -129,40 +150,38 @@ async def test_execution_store_update(
     db_session: AsyncSession,
 ) -> None:
     execution_id = uuid4()
-    step_id = uuid4()
     now = datetime.now(timezone.utc)
-
-    store = PostgreSQLExecutionStore(db_session)
 
     execution = ExecutionRecord(
         execution_id=execution_id,
         state="running",
         status="running",
-        metadata={"test": True},
+        metadata={"attempt": 1},
         created_at=now,
         started_at=now,
         steps=(
             StepRecord(
-                step_id=step_id,
+                step_id=uuid4(),
                 number=1,
-                type="tool",
+                type="tool_call",
                 status="running",
-                input={"value": 1},
+                input={"tool": "search"},
                 started_at=now,
             ),
         ),
     )
 
+    store = PostgreSQLExecutionStore(db_session)
+
     await store.create(execution)
+
+    step_id = execution.steps[0].step_id
 
     updated = ExecutionRecord(
         execution_id=execution_id,
         state="completed",
         status="completed",
-        metadata={
-            "test": True,
-            "updated": True,
-        },
+        metadata={"attempt": 1, "updated": True},
         created_at=now,
         started_at=now,
         completed_at=now,
@@ -170,10 +189,20 @@ async def test_execution_store_update(
             StepRecord(
                 step_id=step_id,
                 number=1,
-                type="tool",
+                type="tool_call",
                 status="completed",
-                input={"value": 1},
-                output={"value": 2},
+                input={"tool": "search"},
+                output={"result": "success"},
+                started_at=now,
+                completed_at=now,
+            ),
+            StepRecord(
+                step_id=uuid4(),
+                number=2,
+                type="tool_call",
+                status="completed",
+                input={"tool": "calculator"},
+                output={"result": 100},
                 started_at=now,
                 completed_at=now,
             ),
@@ -185,23 +214,179 @@ async def test_execution_store_update(
     loaded = await store.get(execution_id)
 
     assert loaded is not None
-    assert loaded.execution_id == execution_id
     assert loaded.state == "completed"
     assert loaded.status == "completed"
-
-    assert loaded.metadata["test"] is True
-    assert loaded.metadata["updated"] is True
-
-    assert loaded.created_at == now
-    assert loaded.started_at == now
+    assert loaded.metadata == {
+        "attempt": 1,
+        "updated": True,
+    }
     assert loaded.completed_at == now
 
-    assert len(loaded.steps) == 1
-    assert loaded.steps[0].step_id == step_id
+    assert len(loaded.steps) == 2
     assert loaded.steps[0].number == 1
     assert loaded.steps[0].status == "completed"
-    assert loaded.steps[0].input == {"value": 1}
-    assert loaded.steps[0].output == {"value": 2}
+    assert loaded.steps[0].output == {"result": "success"}
+
+    assert loaded.steps[1].number == 2
+    assert loaded.steps[1].output == {"result": 100}
+
+
+@pytest.mark.asyncio
+async def test_execution_store_update_removes_deleted_steps(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    first_step_id = uuid4()
+    second_step_id = uuid4()
+
+    execution = ExecutionRecord(
+        execution_id=execution_id,
+        state="running",
+        status="running",
+        created_at=now,
+        steps=(
+            StepRecord(
+                step_id=first_step_id,
+                number=1,
+                type="tool_call",
+                status="completed",
+                output={"result": 1},
+                started_at=now,
+                completed_at=now,
+            ),
+            StepRecord(
+                step_id=second_step_id,
+                number=2,
+                type="tool_call",
+                status="completed",
+                output={"result": 2},
+                started_at=now,
+                completed_at=now,
+            ),
+        ),
+    )
+
+    store = PostgreSQLExecutionStore(db_session)
+
+    await store.create(execution)
+
+    updated = ExecutionRecord(
+        execution_id=execution_id,
+        state="running",
+        status="running",
+        created_at=now,
+        steps=(
+            StepRecord(
+                step_id=first_step_id,
+                number=1,
+                type="tool_call",
+                status="completed",
+                output={"result": 100},
+                started_at=now,
+                completed_at=now,
+            ),
+        ),
+    )
+
+    await store.update(updated)
+
+    loaded = await store.get(execution_id)
+
+    assert loaded is not None
+    assert len(loaded.steps) == 1
+    assert loaded.steps[0].step_id == first_step_id
+    assert loaded.steps[0].output == {"result": 100}
+
+
+@pytest.mark.asyncio
+async def test_execution_store_update_rejects_missing_execution(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    execution = ExecutionRecord(
+        execution_id=execution_id,
+        state="completed",
+        status="completed",
+        created_at=now,
+    )
+
+    store = PostgreSQLExecutionStore(db_session)
+
+    with pytest.raises(ValueError):
+        await store.update(execution)
+
+
+@pytest.mark.asyncio
+async def test_execution_store_rejects_duplicate_execution_id(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    execution = ExecutionRecord(
+        execution_id=execution_id,
+        state="running",
+        status="running",
+        created_at=now,
+    )
+
+    store = PostgreSQLExecutionStore(db_session)
+
+    await store.create(execution)
+
+    with pytest.raises(ValueError):
+        await store.create(execution)
+
+
+@pytest.mark.asyncio
+async def test_execution_store_rejects_duplicate_step_number(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    execution = ExecutionRecord(
+        execution_id=execution_id,
+        state="running",
+        status="running",
+        created_at=now,
+        steps=(
+            StepRecord(
+                step_id=uuid4(),
+                number=1,
+                type="tool_call",
+                status="completed",
+                input={"tool": "first"},
+                output={"result": "ok"},
+                started_at=now,
+                completed_at=now,
+            ),
+            StepRecord(
+                step_id=uuid4(),
+                number=1,
+                type="tool_call",
+                status="completed",
+                input={"tool": "second"},
+                output={"result": "ok"},
+                started_at=now,
+                completed_at=now,
+            ),
+        ),
+    )
+
+    store = PostgreSQLExecutionStore(db_session)
+
+    with pytest.raises(IntegrityError):
+        await store.create(execution)
+
+
+# ---------------------------------------------------------------------------
+# Result Store
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -211,20 +396,7 @@ async def test_execution_result_store_save_and_get(
     execution_id = uuid4()
     now = datetime.now(timezone.utc)
 
-    execution_store = PostgreSQLExecutionStore(db_session)
-
-    execution = ExecutionRecord(
-        execution_id=execution_id,
-        state="completed",
-        status="completed",
-        metadata={},
-        created_at=now,
-        completed_at=now,
-    )
-
-    await execution_store.create(execution)
-
-    result_store = PostgreSQLExecutionResultStore(db_session)
+    await create_test_execution(db_session, execution_id)
 
     result = ExecutionResultRecord(
         execution_id=execution_id,
@@ -232,24 +404,78 @@ async def test_execution_result_store_save_and_get(
         output={"answer": 42},
         metadata={"model": "test-model"},
         created_at=now,
+        started_at=now,
         completed_at=now,
         duration_seconds=1.25,
     )
 
-    await result_store.save(result)
+    store = PostgreSQLExecutionResultStore(db_session)
 
-    loaded = await result_store.get(execution_id)
+    await store.save(result)
+
+    loaded = await store.get(execution_id)
 
     assert loaded is not None
     assert loaded.execution_id == execution_id
     assert loaded.status == "completed"
     assert loaded.output == {"answer": 42}
-    assert loaded.error is None
-    assert loaded.error_type is None
     assert loaded.metadata == {"model": "test-model"}
-    assert loaded.created_at == now
-    assert loaded.completed_at == now
     assert loaded.duration_seconds == 1.25
+
+
+@pytest.mark.asyncio
+async def test_execution_result_store_get_returns_none_for_missing_result(
+    db_session: AsyncSession,
+) -> None:
+    store = PostgreSQLExecutionResultStore(db_session)
+
+    loaded = await store.get(uuid4())
+
+    assert loaded is None
+
+
+@pytest.mark.asyncio
+async def test_execution_result_store_updates_existing_result(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    await create_test_execution(db_session, execution_id)
+
+    store = PostgreSQLExecutionResultStore(db_session)
+
+    first = ExecutionResultRecord(
+        execution_id=execution_id,
+        status="completed",
+        output={"value": "first"},
+        created_at=now,
+        completed_at=now,
+    )
+
+    second = ExecutionResultRecord(
+        execution_id=execution_id,
+        status="completed",
+        output={"value": "second"},
+        metadata={"updated": True},
+        created_at=now,
+        completed_at=now,
+    )
+
+    await store.save(first)
+    await store.save(second)
+
+    loaded = await store.get(execution_id)
+
+    assert loaded is not None
+    assert loaded.execution_id == execution_id
+    assert loaded.output == {"value": "second"}
+    assert loaded.metadata == {"updated": True}
+
+
+# ---------------------------------------------------------------------------
+# Event Store
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -259,42 +485,29 @@ async def test_execution_event_store_append_and_list(
     execution_id = uuid4()
     now = datetime.now(timezone.utc)
 
-    execution_store = PostgreSQLExecutionStore(db_session)
+    await create_test_execution(db_session, execution_id)
 
-    execution = ExecutionRecord(
-        execution_id=execution_id,
-        state="running",
-        status="running",
-        created_at=now,
-    )
-
-    await execution_store.create(execution)
-
-    event_store = PostgreSQLExecutionEventStore(db_session)
+    store = PostgreSQLExecutionEventStore(db_session)
 
     event = ExecutionEventRecord(
         event_id=uuid4(),
         execution_id=execution_id,
         sequence=1,
-        type="execution.started",
-        data={"message": "started"},
+        type="execution_started",
+        data={"foo": "bar"},
         created_at=now,
     )
 
-    await event_store.append(event)
+    await store.append(event)
 
-    events = await event_store.list(execution_id)
+    events = await store.list(execution_id)
 
     assert len(events) == 1
-
-    loaded = events[0]
-
-    assert loaded.event_id == event.event_id
-    assert loaded.execution_id == execution_id
-    assert loaded.sequence == 1
-    assert loaded.type == "execution.started"
-    assert loaded.data == {"message": "started"}
-    assert loaded.created_at == now
+    assert events[0].event_id == event.event_id
+    assert events[0].execution_id == execution_id
+    assert events[0].sequence == 1
+    assert events[0].type == "execution_started"
+    assert events[0].data == {"foo": "bar"}
 
 
 @pytest.mark.asyncio
@@ -304,59 +517,47 @@ async def test_execution_event_store_append_many(
     execution_id = uuid4()
     now = datetime.now(timezone.utc)
 
-    execution_store = PostgreSQLExecutionStore(db_session)
+    await create_test_execution(db_session, execution_id)
 
-    execution = ExecutionRecord(
-        execution_id=execution_id,
-        state="running",
-        status="running",
-        created_at=now,
-    )
-
-    await execution_store.create(execution)
-
-    event_store = PostgreSQLExecutionEventStore(db_session)
+    store = PostgreSQLExecutionEventStore(db_session)
 
     events = [
         ExecutionEventRecord(
             event_id=uuid4(),
             execution_id=execution_id,
             sequence=1,
-            type="execution.started",
-            data={},
+            type="execution_started",
+            data={"step": 1},
             created_at=now,
         ),
         ExecutionEventRecord(
             event_id=uuid4(),
             execution_id=execution_id,
             sequence=2,
-            type="step.started",
-            data={"step": 1},
+            type="step_started",
+            data={"step": 2},
             created_at=now,
         ),
         ExecutionEventRecord(
             event_id=uuid4(),
             execution_id=execution_id,
             sequence=3,
-            type="step.completed",
-            data={"step": 1},
+            type="step_completed",
+            data={"step": 2},
             created_at=now,
         ),
     ]
 
-    await event_store.append_many(events)
+    await store.append_many(events)
 
-    loaded = await event_store.list(execution_id)
+    loaded = await store.list(execution_id)
 
-    assert len(loaded) == 3
     assert [event.sequence for event in loaded] == [1, 2, 3]
-
-    assert loaded[0].type == "execution.started"
-    assert loaded[1].type == "step.started"
-    assert loaded[2].type == "step.completed"
-
-    assert loaded[1].data == {"step": 1}
-    assert loaded[2].data == {"step": 1}
+    assert [event.type for event in loaded] == [
+        "execution_started",
+        "step_started",
+        "step_completed",
+    ]
 
 
 @pytest.mark.asyncio
@@ -366,28 +567,17 @@ async def test_event_store_rejects_duplicate_sequence(
     execution_id = uuid4()
     now = datetime.now(timezone.utc)
 
-    execution_store = PostgreSQLExecutionStore(db_session)
+    await create_test_execution(db_session, execution_id)
 
-    execution = ExecutionRecord(
-        execution_id=execution_id,
-        state="running",
-        status="running",
-        created_at=now,
-    )
+    store = PostgreSQLExecutionEventStore(db_session)
 
-    await execution_store.create(execution)
-
-    event_store = PostgreSQLExecutionEventStore(db_session)
-
-    first_event = ExecutionEventRecord(
+    first = ExecutionEventRecord(
         event_id=uuid4(),
         execution_id=execution_id,
         sequence=1,
-        type="execution.started",
+        type="first",
         created_at=now,
     )
-
-    await event_store.append(first_event)
 
     duplicate = ExecutionEventRecord(
         event_id=uuid4(),
@@ -397,55 +587,307 @@ async def test_event_store_rejects_duplicate_sequence(
         created_at=now,
     )
 
-    with pytest.raises(ValueError):
-        await event_store.append(duplicate)
+    await store.append(first)
 
-    await db_session.rollback()
-
-ROLLBACK_TEST_EXECUTION_ID = uuid4()
+    with pytest.raises(ValueError, match="already exists"):
+        await store.append(duplicate)
 
 
 @pytest.mark.asyncio
-async def test_transaction_is_rolled_back_after_test(
+async def test_execution_event_store_lists_events_after_sequence(
     db_session: AsyncSession,
 ) -> None:
-    """
-    Create an execution without committing it.
-
-    The fixture should roll back the transaction after this
-    test finishes.
-    """
+    execution_id = uuid4()
     now = datetime.now(timezone.utc)
+
+    await create_test_execution(db_session, execution_id)
+
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    events = [
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=1,
+            type="first",
+            created_at=now,
+        ),
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=2,
+            type="second",
+            created_at=now,
+        ),
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=3,
+            type="third",
+            created_at=now,
+        ),
+    ]
+
+    await store.append_many(events)
+
+    loaded = await store.list(
+        execution_id,
+        after_sequence=1,
+    )
+
+    assert [event.sequence for event in loaded] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_execution_event_store_returns_events_in_sequence_order(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    await create_test_execution(db_session, execution_id)
+
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    events = [
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=3,
+            type="third",
+            created_at=now,
+        ),
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=1,
+            type="first",
+            created_at=now,
+        ),
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=2,
+            type="second",
+            created_at=now,
+        ),
+    ]
+
+    await store.append_many(events)
+
+    loaded = await store.list(execution_id)
+
+    assert [event.sequence for event in loaded] == [1, 2, 3]
+    assert [event.type for event in loaded] == [
+        "first",
+        "second",
+        "third",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execution_event_store_rejects_sequence_gap(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    await create_test_execution(db_session, execution_id)
+
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    events = [
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=1,
+            type="first",
+            created_at=now,
+        ),
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=3,
+            type="third",
+            created_at=now,
+        ),
+    ]
+
+    with pytest.raises(ValueError):
+        await store.append_many(events)
+
+
+@pytest.mark.asyncio
+async def test_execution_event_store_rejects_duplicate_sequence_in_batch(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    await create_test_execution(db_session, execution_id)
+
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    events = [
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=1,
+            type="first",
+            created_at=now,
+        ),
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=1,
+            type="duplicate",
+            created_at=now,
+        ),
+    ]
+
+    with pytest.raises(ValueError):
+        await store.append_many(events)
+
+
+@pytest.mark.asyncio
+async def test_execution_event_store_rejects_batch_starting_after_existing_sequence(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    await create_test_execution(db_session, execution_id)
+
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    await store.append(
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=1,
+            type="first",
+            created_at=now,
+        )
+    )
+
+    events = [
+        ExecutionEventRecord(
+            event_id=uuid4(),
+            execution_id=execution_id,
+            sequence=3,
+            type="third",
+            created_at=now,
+        ),
+    ]
+
+    with pytest.raises(ValueError):
+        await store.append_many(events)
+
+
+@pytest.mark.asyncio
+async def test_execution_event_store_rejects_invalid_after_sequence(
+    db_session: AsyncSession,
+) -> None:
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    with pytest.raises(ValueError):
+        await store.list(uuid4(), after_sequence=-1)
+
+
+# ---------------------------------------------------------------------------
+# Transaction / Isolation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transaction_isolation_and_rollback(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
 
     store = PostgreSQLExecutionStore(db_session)
 
     execution = ExecutionRecord(
-        execution_id=ROLLBACK_TEST_EXECUTION_ID,
+        execution_id=execution_id,
         state="running",
         status="running",
-        created_at=now,
+        created_at=datetime.now(timezone.utc),
     )
 
     await store.create(execution)
 
-    loaded = await store.get(ROLLBACK_TEST_EXECUTION_ID)
+    loaded_inside_transaction = await store.get(execution_id)
 
-    assert loaded is not None
-    assert loaded.execution_id == ROLLBACK_TEST_EXECUTION_ID
+    assert loaded_inside_transaction is not None
+    assert loaded_inside_transaction.execution_id == execution_id
+
+    await db_session.flush()
+
+    # The fixture will roll the transaction back after this test.
+    # Therefore the execution must not exist when the next test
+    # uses a fresh transaction.
 
 
 @pytest.mark.asyncio
-async def test_previous_test_data_was_rolled_back(
+async def test_persistence_data_isolation_between_tests(
     db_session: AsyncSession,
 ) -> None:
     """
-    The previous test inserted ROLLBACK_TEST_EXECUTION_ID.
+    Verify that tests do not depend on data persisted by previous tests.
 
-    Because the fixture rolled back its transaction, this test
-    must not be able to see that execution.
+    This uses a fresh UUID, so the test should always see no execution.
     """
+    execution_id = uuid4()
+
     store = PostgreSQLExecutionStore(db_session)
 
-    loaded = await store.get(ROLLBACK_TEST_EXECUTION_ID)
+    loaded = await store.get(execution_id)
 
     assert loaded is None
+
+
+# ---------------------------------------------------------------------------
+# Foreign Key Enforcement
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_event_store_rejects_missing_execution(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    store = PostgreSQLExecutionEventStore(db_session)
+
+    event = ExecutionEventRecord(
+        event_id=uuid4(),
+        execution_id=execution_id,
+        sequence=1,
+        type="execution_started",
+        created_at=now,
+    )
+
+    with pytest.raises(IntegrityError):
+        await store.append(event)
+
+
+@pytest.mark.asyncio
+async def test_result_store_rejects_missing_execution(
+    db_session: AsyncSession,
+) -> None:
+    execution_id = uuid4()
+    now = datetime.now(timezone.utc)
+
+    store = PostgreSQLExecutionResultStore(db_session)
+
+    result = ExecutionResultRecord(
+        execution_id=execution_id,
+        status="completed",
+        output={"result": "ok"},
+        created_at=now,
+        completed_at=now,
+    )
+
+    with pytest.raises(IntegrityError):
+        await store.save(result)

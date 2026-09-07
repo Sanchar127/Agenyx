@@ -10,6 +10,7 @@ from app.agent_runtime.persistence.models import (
     ExecutionEventRecord,
     ExecutionRecord,
     ExecutionResultRecord,
+    StepRecord,
 )
 from app.db.models import (
     ExecutionEventModel,
@@ -78,7 +79,9 @@ class PostgreSQLExecutionStore:
     ) -> ExecutionRecord | None:
         result = await self._session.execute(
             select(ExecutionModel)
-            .where(ExecutionModel.execution_id == execution_id)
+            .where(
+                ExecutionModel.execution_id == execution_id,
+            )
         )
 
         model = result.scalar_one_or_none()
@@ -88,7 +91,9 @@ class PostgreSQLExecutionStore:
 
         steps_result = await self._session.execute(
             select(StepModel)
-            .where(StepModel.execution_id == execution_id)
+            .where(
+                StepModel.execution_id == execution_id,
+            )
             .order_by(StepModel.number)
         )
 
@@ -118,7 +123,7 @@ class PostgreSQLExecutionStore:
             select(ExecutionModel)
             .where(
                 ExecutionModel.execution_id
-                == execution.execution_id
+                == execution.execution_id,
             )
         )
 
@@ -142,7 +147,7 @@ class PostgreSQLExecutionStore:
             select(StepModel)
             .where(
                 StepModel.execution_id
-                == execution.execution_id
+                == execution.execution_id,
             )
         )
 
@@ -195,9 +200,7 @@ class PostgreSQLExecutionStore:
     @staticmethod
     def _step_to_record(
         step: StepModel,
-    ):
-        from app.agent_runtime.persistence.models import StepRecord
-
+    ) -> StepRecord:
         return StepRecord(
             step_id=step.step_id,
             number=step.number,
@@ -224,7 +227,7 @@ class PostgreSQLExecutionResultStore:
         result: ExecutionResultRecord,
     ) -> None:
         existing_result = await self.get(
-            result.execution_id
+            result.execution_id,
         )
 
         if existing_result is None:
@@ -248,7 +251,7 @@ class PostgreSQLExecutionResultStore:
                 select(ExecutionResultModel)
                 .where(
                     ExecutionResultModel.execution_id
-                    == result.execution_id
+                    == result.execution_id,
                 )
             )
 
@@ -274,7 +277,7 @@ class PostgreSQLExecutionResultStore:
             select(ExecutionResultModel)
             .where(
                 ExecutionResultModel.execution_id
-                == execution_id
+                == execution_id,
             )
         )
 
@@ -302,6 +305,13 @@ class PostgreSQLExecutionEventStore:
     PostgreSQL-backed implementation of ExecutionEventStore.
 
     Events are append-only and ordered by sequence.
+
+    Sequence numbers are contiguous for each execution:
+
+        1 -> 2 -> 3 -> 4 -> ...
+
+    A new batch must continue immediately after the last
+    persisted sequence number.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -341,62 +351,88 @@ class PostgreSQLExecutionEventStore:
         await self._session.flush()
 
     async def append_many(
-            self,
-            events: Sequence[ExecutionEventRecord],
-        ) -> None:
-            """
-            Append multiple events while preserving per-execution ordering.
+        self,
+        events: Sequence[ExecutionEventRecord],
+    ) -> None:
+        """
+        Append multiple events while preserving per-execution ordering.
 
-            Events for the same execution must be strictly increasing
-            relative to both:
-            - events already persisted
-            - other events in this batch
-            """
+        For every execution:
 
-            if not events:
-                return
+        - The first event must have sequence 1.
+        - A subsequent batch must begin at last_sequence + 1.
+        - Events inside the batch must be contiguous.
+        - Duplicate sequences are rejected.
+        - No events are added until the complete batch passes validation.
 
-            grouped: dict[UUID, list[ExecutionEventRecord]] = {}
+        Example:
 
-            for event in events:
-                grouped.setdefault(
-                    event.execution_id,
-                    [],
-                ).append(event)
+            Existing: 1, 2, 3
+            Valid:    4, 5, 6
+            Invalid:  5, 6
+            Invalid: 4, 6
 
-            # Validate each execution's batch against persisted events.
-            for execution_id, batch in grouped.items():
-                batch = sorted(
-                    batch,
-                    key=lambda event: event.sequence,
+        This method only flushes changes. Transaction ownership remains
+        with the caller.
+        """
+
+        if not events:
+            return
+
+        grouped: dict[UUID, list[ExecutionEventRecord]] = {}
+
+        for event in events:
+            grouped.setdefault(
+                event.execution_id,
+                [],
+            ).append(event)
+
+        validated_batches: dict[
+            UUID,
+            list[ExecutionEventRecord],
+        ] = {}
+
+        for execution_id, batch in grouped.items():
+            batch = sorted(
+                batch,
+                key=lambda event: event.sequence,
+            )
+
+            last_event_result = await self._session.execute(
+                select(ExecutionEventModel.sequence)
+                .where(
+                    ExecutionEventModel.execution_id
+                    == execution_id,
                 )
-
-                last_event_result = await self._session.execute(
-                    select(ExecutionEventModel.sequence)
-                    .where(
-                        ExecutionEventModel.execution_id == execution_id,
-                    )
-                    .order_by(
-                        ExecutionEventModel.sequence.desc(),
-                    )
-                    .limit(1)
+                .order_by(
+                    ExecutionEventModel.sequence.desc(),
                 )
+                .limit(1)
+            )
 
-                last_sequence = last_event_result.scalar_one_or_none() or 0
+            last_sequence = (
+                last_event_result.scalar_one_or_none()
+                or 0
+            )
 
-                previous_sequence = last_sequence
+            expected_sequence = last_sequence + 1
 
-                for event in batch:
-                    if event.sequence <= previous_sequence:
-                        raise ValueError(
-                            "Event sequences must be strictly increasing "
-                            f"for execution {execution_id}"
-                        )
+            for event in batch:
+                if event.sequence != expected_sequence:
+                    raise ValueError(
+                        "Event sequences must be contiguous for "
+                        f"execution {execution_id}: expected "
+                        f"{expected_sequence}, got {event.sequence}"
+                    )
 
-                    previous_sequence = event.sequence
+                expected_sequence += 1
 
-            # Only add events after the entire batch has passed validation.
-            for event in events:
+            validated_batches[execution_id] = batch
+
+        # Only add events after every execution's batch has
+        # completely passed validation.
+        for batch in validated_batches.values():
+            for event in batch:
                 self._session.add(
                     ExecutionEventModel(
                         event_id=event.event_id,
@@ -408,7 +444,7 @@ class PostgreSQLExecutionEventStore:
                     )
                 )
 
-            await self._session.flush()
+        await self._session.flush()
 
     async def list(
         self,
@@ -429,7 +465,9 @@ class PostgreSQLExecutionEventStore:
                 ExecutionEventModel.sequence
                 > after_sequence,
             )
-            .order_by(ExecutionEventModel.sequence)
+            .order_by(
+                ExecutionEventModel.sequence,
+            )
         )
 
         models = result.scalars().all()
