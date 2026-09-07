@@ -32,6 +32,9 @@ from app.agent_runtime.event_stream import EventStream
 from app.agent_runtime.event_types import AgentEventType
 from app.agent_runtime.events import AgentEvent
 from app.agent_runtime.execution_limits import ExecutionLimits
+from app.agent_runtime.persistence.service import (
+    ExecutionPersistence,
+)
 from app.agent_runtime.planner import Planner
 from app.agent_runtime.prompts import SYSTEM_PROMPT
 from app.agent_runtime.submission import ExecutionSubmission
@@ -117,6 +120,7 @@ class AgentRuntime:
     - support explicit execution cancellation
     - emit runtime execution events
     - retain an in-process execution record
+    - optionally persist durable execution state/results/events
     - produce the public AgentResponse
 
     Provider/model-specific logic does not belong here.
@@ -238,6 +242,17 @@ class AgentRuntime:
         semantics to remain unchanged while preparing the runtime
         for asynchronous execution submission and execution-status
         APIs.
+
+    Persistence semantics:
+
+        persistence=None
+            Persistence is disabled. This preserves lightweight
+            unit-test and local-runtime behavior.
+
+        persistence=<ExecutionPersistence>
+            Durable execution state, events, and terminal results
+            can be persisted without coupling the runtime directly
+            to PostgreSQL or SQLAlchemy.
     """
 
     def __init__(
@@ -259,6 +274,7 @@ class AgentRuntime:
         reserved_output_tokens: int = 0,
         approval_policy: ApprovalPolicy | None = None,
         approval_manager: ApprovalManager | None = None,
+        persistence: ExecutionPersistence | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError(
@@ -306,6 +322,18 @@ class AgentRuntime:
         self.inference = inference
         self.tools = tools
         self.planner = planner
+
+        # ---------------------------------------------------------
+        # Optional durable persistence.
+        #
+        # The runtime depends only on the persistence abstraction.
+        # It does not know about PostgreSQL or SQLAlchemy.
+        #
+        # None keeps existing unit tests and local callers
+        # persistence-independent.
+        # ---------------------------------------------------------
+
+        self.persistence = persistence
 
         # Backward compatibility with existing callers/tests.
         self.max_steps = max_steps
@@ -369,6 +397,24 @@ class AgentRuntime:
             str,
             _ExecutionRecord,
         ] = {}
+
+    async def _create_persistent_execution(
+        self,
+        execution: Execution,
+    ) -> None:
+        if self.persistence is None:
+            return
+
+        await self.persistence.create_execution(execution)
+
+    async def _persist_execution(
+        self,
+        execution: Execution,
+    ) -> None:
+        if self.persistence is None:
+            return
+
+        await self.persistence.update_execution(execution)
 
     async def run(
         self,
@@ -537,6 +583,10 @@ class AgentRuntime:
                 "Execution record is missing from runtime registry"
             )
 
+        await self._create_persistent_execution(
+            execution,
+        )
+
         await self._publish_event(
             execution_id=execution_id,
             event_type=AgentEventType.EXECUTION_STARTED,
@@ -557,6 +607,10 @@ class AgentRuntime:
                 ExecutionState.PLANNING
             )
 
+            await self._persist_execution(
+                execution,
+            )
+
             output = await self._execute(
                 execution=execution,
                 context=context,
@@ -572,6 +626,10 @@ class AgentRuntime:
 
             execution.transition_to(
                 ExecutionState.COMPLETED
+            )
+
+            await self._persist_execution(
+                execution,
             )
 
             result = ExecutionResult.from_execution(
@@ -606,6 +664,9 @@ class AgentRuntime:
             }:
                 execution.transition_to(
                     ExecutionState.CANCELLED
+                )
+                await self._persist_execution(
+                    execution,
                 )
 
             await self._publish_event(
@@ -691,6 +752,10 @@ class AgentRuntime:
                 execution.mark_failed(
                     error=str(exc),
                     error_type=type(exc).__name__,
+                )
+
+                await self._persist_execution(
+                    execution,
                 )
 
             context.add_error(str(exc))
@@ -865,7 +930,7 @@ class AgentRuntime:
                 cancellation=cancellation,
                 intent=task,
                 session_id=resolved_session_id,
-                task=resolved_task,
+                task=task,
                 required_capabilities=required_capabilities,
             )
         )
@@ -929,7 +994,6 @@ class AgentRuntime:
             #
             # Therefore the detached task must not re-raise.
             return
-
 
     async def stream(
         self,
