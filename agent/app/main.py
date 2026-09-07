@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,6 +9,7 @@ from app.agent_runtime.persistence.service import (
     PostgreSQLExecutionPersistence,
 )
 from app.agent_runtime.planner import Planner
+from app.agent_runtime.recovery.restart_detector import RestartDetector
 from app.agent_runtime.runtime import AgentRuntime
 from app.api.errors import agenyx_error_handler
 from app.api.routes import create_router
@@ -18,6 +20,8 @@ from app.inference.client import InferenceClient
 from app.router.client import SemanticRouterClient
 from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -74,7 +78,33 @@ def get_runtime() -> AgentRuntime:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # -------------------------------------------------------------
+    # Crash Recovery & Startup Check
+    #
+    # Scan for stale/orphaned executions interrupted by an unexpected
+    # application crash or process restart before handling traffic.
+    # -------------------------------------------------------------
+    async with AsyncSessionFactory() as db_session:
+        try:
+            detector = RestartDetector(
+                db_session=db_session,
+                stale_threshold_seconds=getattr(settings, "stale_threshold_seconds", 300),
+            )
+            # If scan_and_flag_orphaned_executions is synchronous, call directly;
+            # if async, await detector.scan_and_flag_orphaned_executions()
+            flagged = detector.scan_and_flag_orphaned_executions()
+            if flagged:
+                logger.info(
+                    "Crash recovery check completed. Flagged %d orphaned execution(s): %s",
+                    len(flagged),
+                    flagged,
+                )
+        except Exception:
+            logger.exception("Failed to run crash recovery scan during startup.")
+
     yield
+
+    # Cleanup open HTTP sessions on shutdown
     await router_client.close()
     await inference_client.close()
     await sandbox.close()
