@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
-from app.agent_runtime.domain.result import ExecutionResult
+from app.agent_runtime.persistence.models import ExecutionResultRecord
 from app.agent_runtime.persistence.models import (
     ExecutionEventRecord,
     ExecutionRecord,
@@ -52,10 +52,7 @@ class ExecutionResultStore(Protocol):
     Durable storage interface for execution results.
     """
 
-    async def save(
-        self,
-        result: ExecutionResult,
-    ) -> None:
+    async def save(self, result: ExecutionResultRecord) -> None:
         """
         Persist an execution result.
         """
