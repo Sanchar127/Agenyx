@@ -1,13 +1,14 @@
+
 from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Protocol
 from uuid import UUID
 
-from app.agent_runtime.persistence.models import ExecutionResultRecord
 from app.agent_runtime.persistence.models import (
     ExecutionEventRecord,
     ExecutionRecord,
+    ExecutionResultRecord,
 )
 
 
@@ -52,7 +53,10 @@ class ExecutionResultStore(Protocol):
     Durable storage interface for execution results.
     """
 
-    async def save(self, result: ExecutionResultRecord) -> None:
+    async def save(
+        self,
+        result: ExecutionResultRecord,
+    ) -> None:
         """
         Persist an execution result.
         """
@@ -61,7 +65,7 @@ class ExecutionResultStore(Protocol):
     async def get(
         self,
         execution_id: UUID,
-    ) -> ExecutionResult | None:
+    ) -> ExecutionResultRecord | None:
         """
         Retrieve an execution result.
         """
