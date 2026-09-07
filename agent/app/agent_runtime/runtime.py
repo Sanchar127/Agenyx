@@ -930,6 +930,65 @@ class AgentRuntime:
             # Therefore the detached task must not re-raise.
             return
 
+
+    async def stream(
+        self,
+        task: str,
+        *,
+        session_id: str | None = None,
+        required_capabilities: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> EventStream:
+        """
+        Start an agent execution and return its live event stream.
+
+        Unlike submit(), this method returns the EventStream itself so
+        callers can immediately consume execution events.
+
+        The execution is registered before the background task starts,
+        preventing a race where a fast execution could finish before
+        the caller obtains its event stream.
+        """
+
+        (
+            execution,
+            context,
+            context_manager,
+            cancellation,
+            record,
+            resolved_session_id,
+            resolved_task,
+        ) = self._create_execution(
+            intent=task,
+            session_id=session_id,
+            task=task,
+            metadata=metadata,
+        )
+
+        event_stream = record.event_stream
+
+        if event_stream is None:
+            raise RuntimeError(
+                "Execution event stream was not created"
+            )
+
+        task_handle = asyncio.create_task(
+            self._run_submitted(
+                execution=execution,
+                context=context,
+                context_manager=context_manager,
+                cancellation=cancellation,
+                intent=task,
+                session_id=resolved_session_id,
+                task=resolved_task,
+                required_capabilities=required_capabilities,
+            )
+        )
+
+        record.task = task_handle
+
+        return event_stream
+
     def get_result(
         self,
         execution_id: str,

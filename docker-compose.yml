@@ -17,8 +17,8 @@ services:
       AGENTYX_INFERENCE_BASE_URL: http://inference:8004
       AGENTYX_SANDBOX_BASE_URL: http://sandbox:9000
 
-    expose:
-      - "8000"
+    ports:
+      - "8000:8000"
 
     depends_on:
       - sandbox

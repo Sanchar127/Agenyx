@@ -29,10 +29,6 @@ const (
 
 	defaultValkeyMasterName = "mymaster"
 
-	defaultValkeySentinelAddrs = "agenyx-valkey-sentinel-0.valkey-sentinel.agenyx.svc.cluster.local:26379," +
-		"agenyx-valkey-sentinel-1.valkey-sentinel.agenyx.svc.cluster.local:26379," +
-		"agenyx-valkey-sentinel-2.valkey-sentinel.agenyx.svc.cluster.local:26379"
-
 	valkeyPingTimeout = 3 * time.Second
 	shutdownTimeout   = 5 * time.Second
 
@@ -100,31 +96,91 @@ func run() error {
 	return serve(httpServer)
 }
 
-// newValkeyClient creates a Valkey client using Sentinel failover.
+// newValkeyClient creates a Valkey client based on the configured
+// deployment topology.
+//
+// Docker Compose uses AGENTYX_VALKEY_URL for a direct connection.
+//
+// Kubernetes uses AGENTYX_VALKEY_SENTINEL_ADDRS for Sentinel-based
+// failover.
+//
+// Exactly one topology must be configured.
+func newValkeyClient() (*redis.Client, error) {
+	valkeyURL := strings.TrimSpace(
+		os.Getenv("AGENTYX_VALKEY_URL"),
+	)
+
+	sentinelAddrsValue := strings.TrimSpace(
+		os.Getenv("AGENTYX_VALKEY_SENTINEL_ADDRS"),
+	)
+
+	switch {
+	case valkeyURL != "" && sentinelAddrsValue != "":
+		return nil, errors.New(
+			"both AGENTYX_VALKEY_URL and AGENTYX_VALKEY_SENTINEL_ADDRS are configured",
+		)
+
+	case valkeyURL != "":
+		return newDirectValkeyClient(valkeyURL)
+
+	case sentinelAddrsValue != "":
+		return newSentinelValkeyClient(sentinelAddrsValue)
+
+	default:
+		return nil, errors.New(
+			"neither AGENTYX_VALKEY_URL nor AGENTYX_VALKEY_SENTINEL_ADDRS is configured",
+		)
+	}
+}
+
+// newDirectValkeyClient creates a standard Valkey client using a
+// redis:// or rediss:// connection URL.
+//
+// This is used by Docker Compose where the router connects directly
+// to the Valkey service.
+func newDirectValkeyClient(
+	valkeyURL string,
+) (*redis.Client, error) {
+	options, err := redis.ParseURL(valkeyURL)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"parse AGENTYX_VALKEY_URL: %w",
+			err,
+		)
+	}
+
+	return redis.NewClient(options), nil
+}
+
+// newSentinelValkeyClient creates a Valkey client using Sentinel
+// failover.
 //
 // The router connects to the Valkey primary discovered by Sentinel.
-// The Valkey server password is supplied through AGENTYX_VALKEY_PASSWORD.
 //
-// Sentinel authentication is intentionally not configured because the
-// current Sentinel deployment does not require authentication.
-func newValkeyClient() (*redis.Client, error) {
+// The Valkey server password is supplied through
+// AGENTYX_VALKEY_PASSWORD.
+//
+// Sentinel authentication is intentionally not configured because
+// the current Sentinel deployment does not require authentication.
+func newSentinelValkeyClient(
+	sentinelAddrsValue string,
+) (*redis.Client, error) {
 	masterName := getEnv(
 		"AGENTYX_VALKEY_MASTER_NAME",
 		defaultValkeyMasterName,
 	)
 
-	sentinelAddrsValue := getEnv(
-		"AGENTYX_VALKEY_SENTINEL_ADDRS",
-		defaultValkeySentinelAddrs,
-	)
-
 	sentinelAddrs := splitCSV(sentinelAddrsValue)
 
 	if len(sentinelAddrs) == 0 {
-		return nil, errors.New("no Valkey Sentinel addresses configured")
+		return nil, errors.New(
+			"AGENTYX_VALKEY_SENTINEL_ADDRS contains no addresses",
+		)
 	}
 
-	valkeyPassword := os.Getenv("AGENTYX_VALKEY_PASSWORD")
+	valkeyPassword := os.Getenv(
+		"AGENTYX_VALKEY_PASSWORD",
+	)
 
 	options := &redis.FailoverOptions{
 		MasterName:    masterName,
@@ -142,9 +198,7 @@ func newValkeyClient() (*redis.Client, error) {
 		DB: 0,
 	}
 
-	client := redis.NewFailoverClient(options)
-
-	return client, nil
+	return redis.NewFailoverClient(options), nil
 }
 
 func pingValkey(client *redis.Client) error {

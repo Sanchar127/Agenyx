@@ -13,7 +13,7 @@ from app.inference.client import InferenceClient
 from app.router.client import SemanticRouterClient
 from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
-
+from app.agent_runtime.planner import Planner
 settings = get_settings()
 
 router_client = SemanticRouterClient(
@@ -27,7 +27,7 @@ inference_client = InferenceClient(
 )
 
 tools = create_tool_registry()
-
+planner = Planner(tools=tools)
 sandbox = ToolSandboxClient(
     base_url=settings.sandbox_base_url,
     timeout_seconds=settings.sandbox_timeout_seconds,
@@ -36,6 +36,7 @@ sandbox = ToolSandboxClient(
 runtime = AgentRuntime(
     router=router_client,
     inference=inference_client,
+    planner=planner,
     tools=tools,
     max_steps=settings.agent_max_steps,
     sandbox=sandbox,
