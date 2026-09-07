@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     sandbox_base_url: str = "http://sandbox:9000"
     sandbox_timeout_seconds: float = 10.0
 
+    # Database
+    database_url: str = (
+        "postgresql+asyncpg://agenyx:agenyx_dev_password"
+        "@postgres:5432/agenyx"
+    )
+
     # Authentication
     jwt_secret: str = "development-only-secret"
     jwt_algorithm: str = "HS256"

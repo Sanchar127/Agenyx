@@ -16,6 +16,7 @@ services:
       AGENTYX_ROUTER_BASE_URL: http://router:8005
       AGENTYX_INFERENCE_BASE_URL: http://inference:8004
       AGENTYX_SANDBOX_BASE_URL: http://sandbox:9000
+      AGENTYX_DATABASE_URL: postgresql+asyncpg://agenyx:agenyx_dev_password@postgres:5432/agenyx
 
     ports:
       - "8000:8000"
@@ -28,8 +29,39 @@ services:
     restart: unless-stopped
 
     # ─────────────────────────────────────────────
+  # PostgreSQL - durable Agent execution storage
+  # ─────────────────────────────────────────────
+  postgres:
+      image: postgres:17-alpine
+
+      container_name: agenyx-postgres
+
+      environment:
+        POSTGRES_DB: agenyx
+        POSTGRES_USER: agenyx
+        POSTGRES_PASSWORD: agenyx_dev_password
+
+      volumes:
+        - postgres_data:/var/lib/postgresql/data
+
+      ports:
+        - "5432:5432"
+
+      healthcheck:
+        test:
+          - CMD-SHELL
+          - pg_isready -U agenyx -d agenyx
+        interval: 5s
+        timeout: 5s
+        retries: 10
+
+      restart: unless-stopped
+
+    # ─────────────────────────────────────────────
   # Semantic Router - Go model selection service
   # ─────────────────────────────────────────────
+
+
   router:
     build:
       context: ./router
@@ -208,3 +240,4 @@ services:
 
 volumes:
   valkey_data:
+  postgres_data:
