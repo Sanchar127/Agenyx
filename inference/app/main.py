@@ -54,19 +54,19 @@ reliability = ReliabilityManager(
 # PROVIDERS
 # =========================================================
 
-provider_registry.register(
-    OpenAICompatibleProvider(
-        provider_name="ollama-local",
-        base_url=settings.backend_base_url,
-        api_key=settings.backend_api_key,
-        timeout=settings.request_timeout_seconds,
-        max_connections=settings.max_connections,
-        max_keepalive_connections=settings.max_keepalive_connections,
-        max_retries=settings.max_retries,
+for provider_name in settings.providers:
+    provider_registry.register(
+        OpenAICompatibleProvider(
+            provider_name=provider_name,
+            base_url=settings.backend_base_url,
+            api_key=settings.backend_api_key,
+            timeout=settings.request_timeout_seconds,
+            max_connections=settings.max_connections,
+            max_keepalive_connections=settings.max_keepalive_connections,
+            max_retries=settings.max_retries,
+        )
     )
-)
 
-for provider_name in provider_registry.list():
     reliability.register(provider_name)
 
 
@@ -74,20 +74,19 @@ for provider_name in provider_registry.list():
 # MODELS
 # =========================================================
 
-model_registry.register(
-    ModelDefinition(
-        model_id="qwen2.5:7b",
-        provider_name="ollama-local",
-    )
-)
+for model_id, provider_name in settings.models:
+    if provider_name not in provider_registry.list():
+        raise ValueError(
+            f"Model '{model_id}' references "
+            f"unregistered provider '{provider_name}'"
+        )
 
-model_registry.register(
-    ModelDefinition(
-        model_id="llama3.2:3b",
-        provider_name="ollama-local",
+    model_registry.register(
+        ModelDefinition(
+            model_id=model_id,
+            provider_name=provider_name,
+        )
     )
-)
-
 
 # =========================================================
 # FAILOVER
@@ -113,12 +112,19 @@ async def lifespan(app: FastAPI):
 
     logger.info(
         "Inference service starting",
-        extra={
-            "app_name": settings.app_name,
-            "app_version": settings.app_version,
-            "providers": settings.providers,
-            "default_model": settings.default_model,
-        },
+            extra={
+                "app_name": settings.app_name,
+                "app_version": settings.app_version,
+                "providers": settings.providers,
+                "models": [
+                    {
+                        "model": model.model_id,
+                        "provider": model.provider_name,
+                    }
+                    for model in model_registry.list_models()
+                ],
+                "default_model": settings.default_model,
+            },
     )
 
     yield
