@@ -2,8 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
-
-from app.main import app, lifespan, settings
+from app.main import app, lifespan, model_registry, settings
 
 
 @pytest.mark.asyncio
@@ -34,6 +33,13 @@ async def test_application_lifespan_startup_and_shutdown_logs():
                     "app_name": app.title,
                     "app_version": app.version,
                     "providers": settings.providers,
+                    "models": [
+                        {
+                            "model": model.model_id,
+                            "provider": model.provider_name,
+                        }
+                        for model in model_registry.list_models()
+                    ],
                     "default_model": settings.default_model,
                 },
             )

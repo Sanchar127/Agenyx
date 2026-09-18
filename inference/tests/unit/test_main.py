@@ -2,9 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-
-from app.main import app
-
+from app.main import app, model_registry, reliability
 
 # =========================================================
 # FIXTURES
@@ -793,6 +791,13 @@ def test_lifespan_logs_startup_and_shutdown():
             "app_name": settings.app_name,
             "app_version": settings.app_version,
             "providers": settings.providers,
+            "models": [
+                {
+                    "model": model.model_id,
+                    "provider": model.provider_name,
+                }
+                for model in model_registry.list_models()
+            ],
             "default_model": settings.default_model,
         },
     )
@@ -804,3 +809,21 @@ def test_lifespan_logs_startup_and_shutdown():
     mock_logger.info.assert_any_call(
         "Inference providers closed"
     )
+@pytest.fixture(autouse=True)
+def reset_reliability():
+    provider_name = "ollama-local"
+
+    state = reliability.get(provider_name)
+
+    state.consecutive_failures = 0
+    state.total_failures = 0
+    state.total_successes = 0
+    state.last_failure_at = None
+    state.last_success_at = None
+    state.circuit_opened_at = None
+    state.circuit_half_opened_at = None
+
+    state.status = type(state.status).HEALTHY
+    state.circuit_state = type(state.circuit_state).CLOSED
+
+    yield
