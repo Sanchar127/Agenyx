@@ -1786,14 +1786,16 @@ class AgentRuntime:
             assistant_message
         )
 
+        tool_steps: dict[str, Step] = {}
+
         for tool_call, _ in admissions:
             self._check_cancellation(
                 cancellation
             )
 
-            step = self._start_step(
-                execution=execution,
-                step_type=StepType.TOOL_CALL,
+            step = Step(
+                number=len(execution.steps) + 1,
+                type=StepType.TOOL_CALL,
                 input={
                     "call_id": tool_call.call_id,
                     "tool_name": tool_call.name,
@@ -1803,20 +1805,21 @@ class AgentRuntime:
                 },
             )
 
-            step.output = {
-                "call_id": tool_call.call_id,
-                "tool_name": tool_call.name,
-            }
+            execution.add_step(step)
+            tool_steps[tool_call.call_id] = step
 
-            step.mark_completed()
-
-        await self._handle_required_approvals(
-            execution=execution,
-            context=context,
-            admissions=admissions,
-            execution_started_at=execution_started_at,
-            cancellation=cancellation,
+        required_approval_call_ids = (
+            await self._handle_required_approvals(
+                execution=execution,
+                context=context,
+                admissions=admissions,
+                execution_started_at=execution_started_at,
+                cancellation=cancellation,
+            )
         )
+
+        for call_id in required_approval_call_ids:
+            tool_steps[call_id].mark_waiting_approval()
 
         self._check_cancellation(
             cancellation
@@ -1833,24 +1836,51 @@ class AgentRuntime:
         async def execute_one(
             tool_call: ToolCall,
         ) -> _ToolExecutionResult:
+            step = tool_steps[tool_call.call_id]
+
             async with semaphore:
-                self._check_cancellation(
-                    cancellation
-                )
+                try:
+                    self._check_cancellation(
+                        cancellation
+                    )
 
-                output = await self._execute_single_tool(
-                    execution=execution,
-                    tool_call=tool_call,
-                    execution_started_at=(
-                        execution_started_at
-                    ),
-                    cancellation=cancellation,
-                )
+                    step.mark_started()
 
-                return _ToolExecutionResult(
-                    tool_call=tool_call,
-                    output=output,
-                )
+                    output = await self._execute_single_tool(
+                        execution=execution,
+                        tool_call=tool_call,
+                        execution_started_at=(
+                            execution_started_at
+                        ),
+                        cancellation=cancellation,
+                    )
+
+                    step.mark_completed(
+                        output=output
+                    )
+
+                    return _ToolExecutionResult(
+                        tool_call=tool_call,
+                        output=output,
+                    )
+
+                except asyncio.CancelledError:
+                    if not step.is_terminal:
+                        step.mark_cancelled()
+                    raise
+
+                except ExecutionCancelled:
+                    if not step.is_terminal:
+                        step.mark_cancelled()
+                    raise
+
+                except Exception as exc:
+                    if not step.is_terminal:
+                        step.mark_failed(
+                            error=str(exc)
+                            or type(exc).__name__
+                        )
+                    raise
 
         tasks = [
             asyncio.create_task(
@@ -2028,7 +2058,7 @@ class AgentRuntime:
         """
 
         if self.approval_policy is None:
-            return
+            return set()
 
         required: list[
             tuple[
@@ -2076,7 +2106,7 @@ class AgentRuntime:
             )
 
         if not required:
-            return
+            return set()
 
         for tool_call, approval_id in required:
             self._check_cancellation(
@@ -2201,6 +2231,11 @@ class AgentRuntime:
                 "approval_count": len(required),
             },
         )
+
+        return {
+            tool_call.call_id
+            for tool_call, _ in required
+        }
 
 
     async def _execute_single_tool(

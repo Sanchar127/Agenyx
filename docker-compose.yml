@@ -119,7 +119,7 @@ services:
     container_name: agenyx-inference
 
     environment:
-      INFERENCE_BACKEND_BASE_URL: http://host.docker.internal:11434/v1
+      INFERENCE_BACKEND_BASE_URL: http://ollama:11434/v1
       INFERENCE_BACKEND_API_KEY: ollama
 
       INFERENCE_DEFAULT_MODEL: qwen2.5:7b
@@ -215,6 +215,29 @@ services:
 
     restart: unless-stopped
 
+    # ─────────────────────────────────────────────
+  # Ollama - local LLM runtime
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+
+    container_name: agenyx-ollama
+
+    volumes:
+      - ollama_data:/root/.ollama
+
+    ports:
+      - "11434:11434"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    restart: unless-stopped
 
   # ─────────────────────────────────────────────
   # Gateway
@@ -241,3 +264,4 @@ services:
 volumes:
   valkey_data:
   postgres_data:
+  ollama_data:
