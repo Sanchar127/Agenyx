@@ -74,6 +74,7 @@ class Execution:
 
     created_at: datetime = field(default_factory=utc_now)
     started_at: datetime | None = None
+    updated_at: datetime = field(default_factory=utc_now)
     completed_at: datetime | None = None
 
     # ------------------------------------------------------------------
@@ -130,6 +131,7 @@ class Execution:
         self.state_machine.transition_to(target)
 
         self._sync_status()
+        self._touch()
 
         if target is ExecutionState.PLANNING:
             self._mark_started()
@@ -172,9 +174,11 @@ class Execution:
             ExecutionState.TOOL_EXECUTION,
             ExecutionState.OBSERVING,
         }:
-            # Preserve legacy idempotent behavior.
-            self._mark_started()
-            self._sync_status()
+            # Preserve legacy idempotent behavior without treating a
+            # no-op call as a durable mutation.
+            if self.started_at is None:
+                self._mark_started()
+                self._touch()
             return
 
         raise RuntimeError(
@@ -206,6 +210,7 @@ class Execution:
                 ExecutionState.INFERENCE
             )
             self._sync_status()
+            self._touch()
 
         if self.state is ExecutionState.INFERENCE:
             self.transition_to(
@@ -244,13 +249,6 @@ class Execution:
             ExecutionState.FAILED,
             ExecutionState.CANCELLED,
         }:
-            if self.state is ExecutionState.FAILED:
-                # Preserve idempotent/update behavior for an already
-                # failed execution.
-                self.error = error
-                self.error_type = error_type
-                return
-
             raise RuntimeError(
                 "Cannot fail execution from terminal state "
                 f"'{self.state.value}'"
@@ -326,6 +324,10 @@ class Execution:
         }
 
         self.status = mapping[self.state]
+
+    def _touch(self) -> None:
+        """Update the last mutation timestamp."""
+        self.updated_at = utc_now()
 
     def _mark_started(self) -> None:
         """

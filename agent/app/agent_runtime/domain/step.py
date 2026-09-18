@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from app.agent_runtime.domain.step_status import StepStatus
 from app.agent_runtime.domain.step_type import StepType
+from app.core.errors import InvalidStateTransition
 
 
 def utc_now() -> datetime:
@@ -18,8 +19,26 @@ class Step:
     """
     Represents one significant operation within an execution.
 
-    A Step belongs to a single Execution and records the
-    lifecycle and data associated with that operation.
+    Step lifecycle:
+
+        CREATED
+           |
+           +--------------------+
+           |                    |
+           v                    v
+    WAITING_APPROVAL          RUNNING
+           |                    |
+           v                    |
+         RUNNING                |
+           |                    |
+           +---------+----------+
+                     |
+          +----------+----------+
+          |          |          |
+          v          v          v
+      COMPLETED    FAILED    CANCELLED
+
+    Terminal states are immutable.
     """
 
     step_id: UUID = field(default_factory=uuid4)
@@ -40,59 +59,93 @@ class Step:
                 "Step number must be greater than zero"
             )
 
+    def mark_waiting_approval(self) -> None:
+        self._transition_to(StepStatus.WAITING_APPROVAL)
+
     def mark_started(self) -> None:
-        self.status = StepStatus.RUNNING
+        if self.status is StepStatus.RUNNING:
+            return
+
+        self._transition_to(StepStatus.RUNNING)
 
         if self.started_at is None:
             self.started_at = utc_now()
 
-    def mark_completed(
-        self,
-        *,
-        output: Any = None,
-    ) -> None:
-        self.status = StepStatus.COMPLETED
+    def mark_completed(self, *, output: Any = None) -> None:
+        self._transition_to(StepStatus.COMPLETED)
+
         self.output = output
 
         if self.completed_at is None:
             self.completed_at = utc_now()
 
-    def mark_failed(
-        self,
-        *,
-        error: str,
-    ) -> None:
+    def mark_failed(self, *, error: str) -> None:
         if not error:
-            raise ValueError(
-                "Step failure error cannot be empty"
-            )
+            raise ValueError("Step failure error cannot be empty")
 
-        self.status = StepStatus.FAILED
+        self._transition_to(StepStatus.FAILED)
+
         self.error = error
 
         if self.completed_at is None:
             self.completed_at = utc_now()
 
     def mark_cancelled(self) -> None:
-        self.status = StepStatus.CANCELLED
+        self._transition_to(StepStatus.CANCELLED)
 
         if self.completed_at is None:
             self.completed_at = utc_now()
 
+    def _transition_to(self, target: StepStatus) -> None:
+        transitions: dict[StepStatus, frozenset[StepStatus]] = {
+            StepStatus.CREATED: frozenset(
+                {
+                    StepStatus.WAITING_APPROVAL,
+                    StepStatus.RUNNING,
+                    StepStatus.FAILED,
+                    StepStatus.CANCELLED,
+                }
+            ),
+            StepStatus.WAITING_APPROVAL: frozenset(
+                {
+                    StepStatus.RUNNING,
+                    StepStatus.FAILED,
+                    StepStatus.CANCELLED,
+                }
+            ),
+            StepStatus.RUNNING: frozenset(
+                {
+                    StepStatus.COMPLETED,
+                    StepStatus.FAILED,
+                    StepStatus.CANCELLED,
+                }
+            ),
+            StepStatus.COMPLETED: frozenset(),
+            StepStatus.FAILED: frozenset(),
+            StepStatus.CANCELLED: frozenset(),
+        }
+
+        if target not in transitions[self.status]:
+            raise InvalidStateTransition(
+                "Invalid step state transition: "
+                f"{self.status.value} -> {target.value}"
+            )
+
+        self.status = target
+
     @property
     def duration_seconds(self) -> float | None:
-        if self.started_at is None:
-            return None
-
-        if self.completed_at is None:
+        if self.started_at is None or self.completed_at is None:
             return None
 
         return max(
             0.0,
-            (
-                self.completed_at - self.started_at
-            ).total_seconds(),
+            (self.completed_at - self.started_at).total_seconds(),
         )
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status.is_terminal
 
     @property
     def is_completed(self) -> bool:
