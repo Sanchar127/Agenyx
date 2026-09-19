@@ -2,10 +2,10 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-
+from app.auth import require_service_auth
 from app.config import get_settings
 from app.failover.manager import FailoverManager
 from app.logger import logger
@@ -411,6 +411,7 @@ async def models() -> dict[str, Any]:
 )
 async def chat_completions(
     request: Request,
+    _:None = Depends(require_service_auth),
 ) -> JSONResponse:
     """
     OpenAI-compatible chat completion endpoint.

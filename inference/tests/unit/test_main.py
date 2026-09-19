@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app, model_registry, reliability
+from app.main import app, model_registry, reliability,settings
 
 # =========================================================
 # FIXTURES
@@ -17,8 +17,15 @@ def client():
     Using TestClient as a context manager ensures that the
     application's lifespan is executed.
     """
+    settings.service_api_key="test-service-key"
 
-    with TestClient(app) as test_client:
+    with TestClient(
+        app,
+        headers={
+            "X-Agenyx-Service-Key": "test-service-key",
+        },
+
+    ) as test_client:
         yield test_client
 
 
