@@ -58,6 +58,7 @@ class Settings(BaseSettings):
 
     backend_api_key: str = "ollama"
 
+    service_api_key: str = ""
     # -----------------------------------------------------
     # HTTP / retry configuration
     # -----------------------------------------------------

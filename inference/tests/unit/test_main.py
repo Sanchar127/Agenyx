@@ -809,11 +809,12 @@ def test_lifespan_logs_startup_and_shutdown():
     mock_logger.info.assert_any_call(
         "Inference providers closed"
     )
+
 @pytest.fixture(autouse=True)
 def reset_reliability():
     provider_name = "ollama-local"
 
-    state = reliability.get(provider_name)
+    state = reliability._states[provider_name]
 
     state.consecutive_failures = 0
     state.total_failures = 0
@@ -825,5 +826,7 @@ def reset_reliability():
 
     state.status = type(state.status).HEALTHY
     state.circuit_state = type(state.circuit_state).CLOSED
+
+    reliability._half_open_probe.clear()
 
     yield

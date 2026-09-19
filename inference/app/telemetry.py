@@ -8,17 +8,13 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+from app.config import Settings
 
-OTEL_ENDPOINT = (
-    "http://agenyx-otel-collector.monitoring.svc.cluster.local:4317"
-)
-
-
-def configure_telemetry() -> None:
+def configure_telemetry(settings: Settings) -> TracerProvider:
     resource = Resource.create(
         {
-            "service.name": "agenyx-inference",
-            "service.namespace": "agenyx",
+            "service.name": settings.otel_service_name,
+            "service.namespace": settings.otel_service_namespace,
         }
     )
 
@@ -27,7 +23,7 @@ def configure_telemetry() -> None:
     )
 
     exporter = OTLPSpanExporter(
-        endpoint=OTEL_ENDPOINT,
+        endpoint=settings.otel_exporter_otlp_endpoint,
         insecure=True,
     )
 
@@ -36,6 +32,8 @@ def configure_telemetry() -> None:
     )
 
     trace.set_tracer_provider(tracer_provider)
+
+    return tracer_provider
 
 
 def instrument_app(app) -> None:

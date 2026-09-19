@@ -112,19 +112,19 @@ async def lifespan(app: FastAPI):
 
     logger.info(
         "Inference service starting",
-            extra={
-                "app_name": settings.app_name,
-                "app_version": settings.app_version,
-                "providers": settings.providers,
-                "models": [
-                    {
-                        "model": model.model_id,
-                        "provider": model.provider_name,
-                    }
-                    for model in model_registry.list_models()
-                ],
-                "default_model": settings.default_model,
-            },
+        extra={
+            "app_name": settings.app_name,
+            "app_version": settings.app_version,
+            "providers": settings.providers,
+            "models": [
+                {
+                    "model": model.model_id,
+                    "provider": model.provider_name,
+                }
+                for model in model_registry.list_models()
+            ],
+            "default_model": settings.default_model,
+        },
     )
 
     yield
@@ -135,13 +135,15 @@ async def lifespan(app: FastAPI):
 
     logger.info("Inference providers closed")
 
+    tracer_provider.shutdown()
 
+    logger.info("Inference telemetry shut down")
 
 # =========================================================
 # TELEMETRY
 # =========================================================
 
-configure_telemetry()
+tracer_provider = configure_telemetry(settings)
 
 # =========================================================
 # APPLICATION
