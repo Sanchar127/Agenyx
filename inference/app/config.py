@@ -77,6 +77,12 @@ class Settings(BaseSettings):
 
     max_failover_attempts: int = 3
 
+    # Tenant model access
+
+    tenant_model_access: str=(
+        "tenant-a=qwen2.5:7b, llama3.2:3b;"
+        "tenant-b=llama3.2:3b"
+    )
     # -----------------------------------------------------
     # OpenTelemetry
     # -----------------------------------------------------
@@ -151,6 +157,49 @@ class Settings(BaseSettings):
 
         return models
 
+    @property
+    def tenant_models(self) -> dict[str, frozenset[str]]:
+        """
+        Return the models each tenant is allowed to use.
+        """
+
+        access: dict[str, frozenset[str]] = {}
+
+        for definition in self.tenant_model_access.split(";"):
+            definition = definition.strip()
+
+            if not definition:
+                continue
+
+            tenant_id, separator, models = definition.partition("=")
+
+            if not separator:
+                raise ValueError(
+                    "Invalid tenant model definition "
+                    f"'{definition}'; expected 'tenant_id=model1|model2'"
+                )
+
+            tenant_id = tenant_id.strip()
+
+            if not tenant_id:
+                raise ValueError(
+                    "Tenant definition contains an empty tenant_id"
+                )
+
+            model_ids = {
+                model.strip()
+                for model in models.split(",")
+                if model.strip()
+            }
+
+            if not model_ids:
+                raise ValueError(
+                    f"Tenant '{tenant_id}' has no authorized models"
+                )
+
+            access[tenant_id] = frozenset(model_ids)
+
+        return access
 
 @lru_cache
 def get_settings() -> Settings:

@@ -70,3 +70,49 @@ def test_model_definition_rejects_empty_provider():
         raise AssertionError(
             "Expected empty provider_name to fail"
         )
+def test_tenant_model_access_parse():
+    settings = Settings(
+        tenant_model_access=(
+            "tenant-a=qwen2.5:7b,llama3.2:3b;"
+            "tenant-b=llama3.2:3b"
+        )
+    )
+
+    assert settings.tenant_models == {
+        "tenant-a": frozenset({
+            "qwen2.5:7b",
+            "llama3.2:3b",
+        }),
+        "tenant-b": frozenset({
+            "llama3.2:3b",
+        }),
+    }
+
+def test_tenant_model_access_rejects_missing_separator():
+    settings = Settings(
+        tenant_model_access="tenant-a"
+    )
+
+    try:
+        settings.tenant_models
+    except ValueError as exc:
+        assert "expected 'tenant_id=model1|model2'" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected invalid tenant model definition to fail"
+        )
+
+
+def test_tenant_model_access_rejects_empty_models():
+    settings = Settings(
+        tenant_model_access="tenant-a="
+    )
+
+    try:
+        settings.tenant_models
+    except ValueError as exc:
+        assert "has no authorized models" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty tenant model access to fail"
+        )
