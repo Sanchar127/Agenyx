@@ -118,6 +118,9 @@ services:
 
     container_name: agenyx-inference
 
+    volumes:
+    - ./inference:/app
+
     environment:
       INFERENCE_BACKEND_BASE_URL: http://ollama:11434/v1
       INFERENCE_BACKEND_API_KEY: ollama
@@ -125,6 +128,7 @@ services:
       INFERENCE_DEFAULT_MODEL: qwen2.5:7b
 
       INFERENCE_PROVIDER_NAMES: ollama-local
+      INFERENCE_SERVICE_API_KEY: test-service-key
 
       INFERENCE_REQUEST_TIMEOUT_SECONDS: "120"
       INFERENCE_MAX_RETRIES: "2"
