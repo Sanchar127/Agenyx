@@ -27,6 +27,39 @@ from app.telemetry import configure_telemetry, instrument_app
 
 
 # =========================================================
+# API ERROR HELPERS
+# =========================================================
+
+
+def api_error(
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+) -> HTTPException:
+    """
+    Create a consistent API error response.
+
+    All expected HTTP API errors use the following structure:
+
+        {
+            "detail": {
+                "code": "...",
+                "message": "..."
+            }
+        }
+    """
+
+    return HTTPException(
+        status_code=status_code,
+        detail={
+            "code": code,
+            "message": message,
+        },
+    )
+
+
+# =========================================================
 # SETTINGS
 # =========================================================
 
@@ -114,6 +147,7 @@ tracer_provider = configure_telemetry(settings)
 # LIFECYCLE
 # =========================================================
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -164,8 +198,50 @@ instrument_app(app)
 
 
 # =========================================================
+# ERROR HANDLING
+# =========================================================
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """
+    Convert unexpected application exceptions into a safe,
+    consistent HTTP 500 response.
+
+    Internal exception details are logged server-side but are
+    never exposed to the client.
+    """
+
+    logger.error(
+        "Unhandled inference service exception",
+        extra={
+            "path": request.url.path,
+            "method": request.method,
+            "error_type": type(exc).__name__,
+        },
+        exc_info=True,
+    )
+
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "message": (
+                    "An unexpected internal error occurred."
+                ),
+            },
+        },
+    )
+
+
+# =========================================================
 # HTTP OBSERVABILITY
 # =========================================================
+
 
 @app.middleware("http")
 async def prometheus_http_metrics(
@@ -257,6 +333,7 @@ async def prometheus_http_metrics(
 # METRICS
 # =========================================================
 
+
 @app.get(
     "/metrics",
     include_in_schema=False,
@@ -276,6 +353,7 @@ async def metrics() -> Response:
 # HEALTH
 # =========================================================
 
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """
@@ -294,6 +372,7 @@ async def health() -> dict[str, str]:
 # =========================================================
 # READINESS
 # =========================================================
+
 
 @app.get("/ready")
 async def ready() -> dict[str, Any]:
@@ -336,15 +415,17 @@ async def ready() -> dict[str, Any]:
         },
     )
 
-    raise HTTPException(
+    raise api_error(
         status_code=503,
-        detail="No inference providers available",
+        code="NO_PROVIDERS_AVAILABLE",
+        message="No inference providers available",
     )
 
 
 # =========================================================
 # PROVIDERS
 # =========================================================
+
 
 @app.get("/v1/providers")
 async def providers() -> dict[str, Any]:
@@ -376,6 +457,7 @@ async def providers() -> dict[str, Any]:
 # =========================================================
 # MODELS
 # =========================================================
+
 
 @app.get("/v1/models")
 async def models() -> dict[str, Any]:
@@ -412,6 +494,7 @@ async def models() -> dict[str, Any]:
 # CHAT COMPLETIONS
 # =========================================================
 
+
 @app.post(
     "/v1/chat/completions",
     response_model=None,
@@ -441,9 +524,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail="Unable to read request body",
+            code="REQUEST_BODY_READ_FAILED",
+            message="Unable to read request body",
         ) from exc
 
     if len(body) > settings.max_request_body_bytes:
@@ -455,9 +539,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=413,
-            detail=(
+            code="REQUEST_BODY_TOO_LARGE",
+            message=(
                 "Request body exceeds the maximum allowed size "
                 f"of {settings.max_request_body_bytes} bytes"
             ),
@@ -474,9 +559,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail="Invalid JSON request",
+            code="INVALID_JSON",
+            message="Invalid JSON request",
         ) from exc
 
     if not isinstance(payload, dict):
@@ -484,9 +570,10 @@ async def chat_completions(
             "Inference request body is not a JSON object"
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail="Request body must be a JSON object",
+            code="INVALID_REQUEST_BODY",
+            message="Request body must be a JSON object",
         )
 
     # -----------------------------------------------------
@@ -500,9 +587,10 @@ async def chat_completions(
             "Inference request contains invalid messages"
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail=(
+            code="INVALID_MESSAGES",
+            message=(
                 "Field 'messages' must be a "
                 "non-empty list"
             ),
@@ -517,9 +605,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail=(
+            code="TOO_MANY_MESSAGES",
+            message=(
                 "Field 'messages' exceeds the maximum allowed "
                 f"count of {settings.max_messages}"
             ),
@@ -536,9 +625,10 @@ async def chat_completions(
                 },
             )
 
-            raise HTTPException(
+            raise api_error(
                 status_code=400,
-                detail=(
+                code="INVALID_MESSAGE",
+                message=(
                     f"Message at index {index} "
                     "must be a JSON object"
                 ),
@@ -557,9 +647,10 @@ async def chat_completions(
                 },
             )
 
-            raise HTTPException(
+            raise api_error(
                 status_code=400,
-                detail=(
+                code="INVALID_MESSAGE_CONTENT",
+                message=(
                     f"Message at index {index} "
                     "'content' must be a string"
                 ),
@@ -579,9 +670,10 @@ async def chat_completions(
                 },
             )
 
-            raise HTTPException(
+            raise api_error(
                 status_code=400,
-                detail=(
+                code="MESSAGE_CONTENT_TOO_LARGE",
+                message=(
                     f"Message at index {index} content exceeds "
                     "the maximum allowed size of "
                     f"{settings.max_message_content_chars} "
@@ -605,9 +697,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail=(
+            code="TOTAL_MESSAGE_CONTENT_TOO_LARGE",
+            message=(
                 "Total message content exceeds the maximum "
                 "allowed size of "
                 f"{settings.max_total_message_content_chars} "
@@ -632,9 +725,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=400,
-            detail="Field 'model' must be a string",
+            code="INVALID_MODEL",
+            message="Field 'model' must be a string",
         )
 
     try:
@@ -648,9 +742,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=404,
-            detail=str(exc),
+            code="MODEL_NOT_FOUND",
+            message=f"Model '{requested_model}' was not found",
         ) from exc
 
     payload["model"] = model.model_id
@@ -676,9 +771,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=501,
-            detail="Streaming is not implemented yet",
+            code="STREAMING_NOT_IMPLEMENTED",
+            message="Streaming is not implemented yet",
         )
 
     # -----------------------------------------------------
@@ -699,9 +795,10 @@ async def chat_completions(
             },
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=503,
-            detail=(
+            code="PROVIDER_NOT_REGISTERED",
+            message=(
                 f"Provider '{model.provider_name}' "
                 "is not registered"
             ),
@@ -726,9 +823,10 @@ async def chat_completions(
             status="circuit_open",
         ).inc()
 
-        raise HTTPException(
+        raise api_error(
             status_code=503,
-            detail=(
+            code="PROVIDER_UNAVAILABLE",
+            message=(
                 f"Provider '{provider.name}' "
                 "is currently unavailable"
             ),
@@ -788,9 +886,10 @@ async def chat_completions(
             exc_info=True,
         )
 
-        raise HTTPException(
+        raise api_error(
             status_code=503,
-            detail=(
+            code="INFERENCE_FAILED",
+            message=(
                 f"Inference failed for provider "
                 f"'{provider.name}'"
             ),
@@ -856,6 +955,7 @@ async def chat_completions(
 # =========================================================
 # RELIABILITY
 # =========================================================
+
 
 @app.get("/v1/reliability")
 async def reliability_status() -> dict[str, Any]:

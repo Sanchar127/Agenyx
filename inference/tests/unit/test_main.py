@@ -2,7 +2,9 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app, model_registry, reliability,settings
+
+from app.main import app, model_registry, reliability, settings
+
 
 # =========================================================
 # FIXTURES
@@ -17,16 +19,40 @@ def client():
     Using TestClient as a context manager ensures that the
     application's lifespan is executed.
     """
-    settings.service_api_key="test-service-key"
+    settings.service_api_key = "test-service-key"
 
     with TestClient(
         app,
         headers={
             "X-Agenyx-Service-Key": "test-service-key",
         },
-
     ) as test_client:
         yield test_client
+
+
+@pytest.fixture(autouse=True)
+def reset_reliability():
+    """
+    Reset provider reliability state between tests.
+    """
+    provider_name = "ollama-local"
+
+    state = reliability._states[provider_name]
+
+    state.consecutive_failures = 0
+    state.total_failures = 0
+    state.total_successes = 0
+    state.last_failure_at = None
+    state.last_success_at = None
+    state.circuit_opened_at = None
+    state.circuit_half_opened_at = None
+
+    state.status = type(state.status).HEALTHY
+    state.circuit_state = type(state.circuit_state).CLOSED
+
+    reliability._half_open_probe.clear()
+
+    yield
 
 
 # =========================================================
@@ -39,11 +65,9 @@ def test_health(client):
     Liveness endpoint should always return HTTP 200 when
     the application process is running.
     """
-
     response = client.get("/health")
 
     assert response.status_code == 200
-
     assert response.json() == {
         "status": "ok",
     }
@@ -59,7 +83,6 @@ def test_ready_when_provider_is_healthy(client):
     Readiness should return 200 when at least one configured
     provider is healthy.
     """
-
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
     mock_provider.health.return_value = True
@@ -71,7 +94,6 @@ def test_ready_when_provider_is_healthy(client):
         response = client.get("/ready")
 
     assert response.status_code == 200
-
     assert response.json() == {
         "status": "ready",
         "provider": "ollama-local",
@@ -84,7 +106,6 @@ def test_ready_when_provider_is_unhealthy(client):
     """
     Readiness should return 503 when no provider is healthy.
     """
-
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
     mock_provider.health.return_value = False
@@ -96,9 +117,11 @@ def test_ready_when_provider_is_unhealthy(client):
         response = client.get("/ready")
 
     assert response.status_code == 503
-
     assert response.json() == {
-        "detail": "No inference providers available",
+        "detail": {
+            "code": "NO_PROVIDERS_AVAILABLE",
+            "message": "No inference providers available",
+        },
     }
 
 
@@ -107,7 +130,6 @@ def test_ready_skips_unregistered_provider(client):
     An unknown configured provider should be skipped rather
     than crashing the readiness endpoint.
     """
-
     with patch(
         "app.main.provider_registry.get",
         side_effect=KeyError("unknown-provider"),
@@ -115,9 +137,11 @@ def test_ready_skips_unregistered_provider(client):
         response = client.get("/ready")
 
     assert response.status_code == 503
-
     assert response.json() == {
-        "detail": "No inference providers available",
+        "detail": {
+            "code": "NO_PROVIDERS_AVAILABLE",
+            "message": "No inference providers available",
+        },
     }
 
 
@@ -130,7 +154,6 @@ def test_list_providers(client):
     """
     Verify the provider listing endpoint.
     """
-
     response = client.get("/v1/providers")
 
     assert response.status_code == 200
@@ -152,7 +175,6 @@ def test_list_providers_structure(client):
     """
     Every provider entry should contain the expected fields.
     """
-
     response = client.get("/v1/providers")
 
     assert response.status_code == 200
@@ -172,7 +194,6 @@ def test_list_models(client):
     """
     Verify that registered models are exposed.
     """
-
     response = client.get("/v1/models")
 
     assert response.status_code == 200
@@ -196,7 +217,6 @@ def test_list_models_structure(client):
     Every model entry should contain the expected OpenAI-style
     model metadata.
     """
-
     response = client.get("/v1/models")
 
     assert response.status_code == 200
@@ -216,7 +236,6 @@ def test_chat_completion_invalid_json(client):
     """
     Invalid JSON should return HTTP 400.
     """
-
     response = client.post(
         "/v1/chat/completions",
         content="not-valid-json",
@@ -228,7 +247,10 @@ def test_chat_completion_invalid_json(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": "Invalid JSON request",
+        "detail": {
+            "code": "INVALID_JSON",
+            "message": "Invalid JSON request",
+        },
     }
 
 
@@ -236,7 +258,6 @@ def test_chat_completion_requires_json_object(client):
     """
     Request body must be a JSON object.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json=["invalid"],
@@ -245,9 +266,10 @@ def test_chat_completion_requires_json_object(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Request body must be a JSON object"
-        ),
+        "detail": {
+            "code": "INVALID_REQUEST_BODY",
+            "message": "Request body must be a JSON object",
+        },
     }
 
 
@@ -255,7 +277,6 @@ def test_chat_completion_requires_messages(client):
     """
     messages must be present.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -266,10 +287,13 @@ def test_chat_completion_requires_messages(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Field 'messages' must be a "
-            "non-empty list"
-        ),
+        "detail": {
+            "code": "INVALID_MESSAGES",
+            "message": (
+                "Field 'messages' must be a "
+                "non-empty list"
+            ),
+        },
     }
 
 
@@ -277,7 +301,6 @@ def test_chat_completion_rejects_empty_messages(client):
     """
     messages must contain at least one message.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -289,10 +312,13 @@ def test_chat_completion_rejects_empty_messages(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Field 'messages' must be a "
-            "non-empty list"
-        ),
+        "detail": {
+            "code": "INVALID_MESSAGES",
+            "message": (
+                "Field 'messages' must be a "
+                "non-empty list"
+            ),
+        },
     }
 
 
@@ -300,7 +326,6 @@ def test_chat_completion_rejects_non_list_messages(client):
     """
     messages must be a list.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -312,10 +337,13 @@ def test_chat_completion_rejects_non_list_messages(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Field 'messages' must be a "
-            "non-empty list"
-        ),
+        "detail": {
+            "code": "INVALID_MESSAGES",
+            "message": (
+                "Field 'messages' must be a "
+                "non-empty list"
+            ),
+        },
     }
 
 
@@ -323,7 +351,6 @@ def test_chat_completion_rejects_non_string_model(client):
     """
     model must be a string when supplied.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -340,7 +367,10 @@ def test_chat_completion_rejects_non_string_model(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": "Field 'model' must be a string",
+        "detail": {
+            "code": "INVALID_MODEL",
+            "message": "Field 'model' must be a string",
+        },
     }
 
 
@@ -348,7 +378,6 @@ def test_chat_completion_unknown_model(client):
     """
     An unknown model should return HTTP 404.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -364,12 +393,20 @@ def test_chat_completion_unknown_model(client):
 
     assert response.status_code == 404
 
+    assert response.json() == {
+        "detail": {
+            "code": "MODEL_NOT_FOUND",
+            "message": (
+                "Model 'does-not-exist' was not found"
+            ),
+        },
+    }
+
 
 def test_chat_completion_streaming_not_implemented(client):
     """
     Streaming is currently intentionally unsupported.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -387,9 +424,10 @@ def test_chat_completion_streaming_not_implemented(client):
     assert response.status_code == 501
 
     assert response.json() == {
-        "detail": (
-            "Streaming is not implemented yet"
-        ),
+        "detail": {
+            "code": "STREAMING_NOT_IMPLEMENTED",
+            "message": "Streaming is not implemented yet",
+        },
     }
 
 
@@ -403,7 +441,6 @@ def test_chat_completion_provider_not_registered(client):
     A model whose provider is not registered should return
     HTTP 503.
     """
-
     fake_model = type(
         "FakeModel",
         (),
@@ -433,10 +470,13 @@ def test_chat_completion_provider_not_registered(client):
     assert response.status_code == 503
 
     assert response.json() == {
-        "detail": (
-            "Provider 'missing-provider' "
-            "is not registered"
-        ),
+        "detail": {
+            "code": "PROVIDER_NOT_REGISTERED",
+            "message": (
+                "Provider 'missing-provider' "
+                "is not registered"
+            ),
+        },
     }
 
 
@@ -450,7 +490,6 @@ def test_chat_completion_rejected_by_reliability(client):
     Requests must fail fast when the reliability manager
     does not allow traffic to the provider.
     """
-
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
 
@@ -477,10 +516,13 @@ def test_chat_completion_rejected_by_reliability(client):
     assert response.status_code == 503
 
     assert response.json() == {
-        "detail": (
-            "Provider 'ollama-local' "
-            "is currently unavailable"
-        ),
+        "detail": {
+            "code": "PROVIDER_UNAVAILABLE",
+            "message": (
+                "Provider 'ollama-local' "
+                "is currently unavailable"
+            ),
+        },
     }
 
     mock_provider.chat_completion.assert_not_awaited()
@@ -496,7 +538,6 @@ def test_chat_completion_success(client):
     A successful provider response should be returned to the
     client unchanged.
     """
-
     fake_response = {
         "id": "chatcmpl-test",
         "object": "chat.completion",
@@ -515,9 +556,7 @@ def test_chat_completion_success(client):
 
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
-    mock_provider.chat_completion.return_value = (
-        fake_response
-    )
+    mock_provider.chat_completion.return_value = fake_response
 
     with patch(
         "app.main.provider_registry.get",
@@ -528,7 +567,6 @@ def test_chat_completion_success(client):
     ), patch(
         "app.main.reliability.record_success"
     ) as mock_record_success:
-
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -546,15 +584,8 @@ def test_chat_completion_success(client):
 
     assert response.json() == fake_response
 
-    assert (
-        response.headers["X-Agenyx-Provider"]
-        == "ollama-local"
-    )
-
-    assert (
-        response.headers["X-Agenyx-Model"]
-        == "qwen2.5:7b"
-    )
+    assert response.headers["X-Agenyx-Provider"] == "ollama-local"
+    assert response.headers["X-Agenyx-Model"] == "qwen2.5:7b"
 
     mock_provider.chat_completion.assert_awaited_once()
 
@@ -568,7 +599,6 @@ def test_chat_completion_passes_payload_to_provider(client):
     The resolved model and original messages should be passed
     to the provider.
     """
-
     fake_response = {
         "id": "test",
         "object": "chat.completion",
@@ -577,9 +607,7 @@ def test_chat_completion_passes_payload_to_provider(client):
 
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
-    mock_provider.chat_completion.return_value = (
-        fake_response
-    )
+    mock_provider.chat_completion.return_value = fake_response
 
     with patch(
         "app.main.provider_registry.get",
@@ -603,10 +631,7 @@ def test_chat_completion_passes_payload_to_provider(client):
 
     mock_provider.chat_completion.assert_awaited_once()
 
-    payload = (
-        mock_provider.chat_completion
-        .await_args.args[0]
-    )
+    payload = mock_provider.chat_completion.await_args.args[0]
 
     assert payload["model"] == "qwen2.5:7b"
 
@@ -630,12 +655,11 @@ def test_chat_completion_provider_failure(client):
     Provider exceptions should be converted to HTTP 503
     and recorded as reliability failures.
     """
-
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
 
-    mock_provider.chat_completion.side_effect = (
-        RuntimeError("backend unavailable")
+    mock_provider.chat_completion.side_effect = RuntimeError(
+        "backend unavailable"
     )
 
     with patch(
@@ -644,7 +668,6 @@ def test_chat_completion_provider_failure(client):
     ), patch(
         "app.main.reliability.record_failure"
     ) as mock_record_failure:
-
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -661,10 +684,13 @@ def test_chat_completion_provider_failure(client):
     assert response.status_code == 503
 
     assert response.json() == {
-        "detail": (
-            "Inference failed for provider "
-            "'ollama-local'"
-        ),
+        "detail": {
+            "code": "INFERENCE_FAILED",
+            "message": (
+                "Inference failed for provider "
+                "'ollama-local'"
+            ),
+        },
     }
 
     mock_record_failure.assert_called_once_with(
@@ -678,12 +704,11 @@ def test_chat_completion_does_not_record_success_on_failure(
     """
     A failed inference must never be recorded as a success.
     """
-
     mock_provider = AsyncMock()
     mock_provider.name = "ollama-local"
 
-    mock_provider.chat_completion.side_effect = (
-        RuntimeError("backend unavailable")
+    mock_provider.chat_completion.side_effect = RuntimeError(
+        "backend unavailable"
     )
 
     with patch(
@@ -694,7 +719,6 @@ def test_chat_completion_does_not_record_success_on_failure(
     ), patch(
         "app.main.reliability.record_success"
     ) as mock_record_success:
-
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -723,22 +747,14 @@ def test_reliability_status(client):
     Reliability endpoint should expose the current provider
     state.
     """
-
-    response = client.get(
-        "/v1/reliability"
-    )
+    response = client.get("/v1/reliability")
 
     assert response.status_code == 200
 
     data = response.json()
 
     assert data["object"] == "reliability"
-
-    assert isinstance(
-        data["providers"],
-        list,
-    )
-
+    assert isinstance(data["providers"], list)
     assert len(data["providers"]) >= 1
 
     provider = data["providers"][0]
@@ -764,31 +780,26 @@ def test_lifespan_closes_provider_registry():
     """
     Application shutdown should close all provider resources.
     """
-
     with patch(
         "app.main.provider_registry.close",
         new_callable=AsyncMock,
     ) as mock_close:
-
         with TestClient(app):
             pass
 
         mock_close.assert_awaited_once()
 
+
 def test_lifespan_logs_startup_and_shutdown():
     """
     Verify that application lifecycle logging is executed.
     """
-
-    from app.main import settings
-
     with patch(
         "app.main.provider_registry.close",
         new_callable=AsyncMock,
     ), patch(
         "app.main.logger"
     ) as mock_logger:
-
         with TestClient(app):
             pass
 
@@ -817,33 +828,17 @@ def test_lifespan_logs_startup_and_shutdown():
         "Inference providers closed"
     )
 
-@pytest.fixture(autouse=True)
-def reset_reliability():
-    provider_name = "ollama-local"
 
-    state = reliability._states[provider_name]
+# =========================================================
+# REQUEST LIMITS
+# =========================================================
 
-    state.consecutive_failures = 0
-    state.total_failures = 0
-    state.total_successes = 0
-    state.last_failure_at = None
-    state.last_success_at = None
-    state.circuit_opened_at = None
-    state.circuit_half_opened_at = None
-
-    state.status = type(state.status).HEALTHY
-    state.circuit_state = type(state.circuit_state).CLOSED
-
-    reliability._half_open_probe.clear()
-
-    yield
 
 def test_chat_completion_rejects_too_many_messages(client):
     """
     Requests exceeding the configured message count limit
     should return HTTP 400.
     """
-
     with patch(
         "app.main.settings.max_messages",
         2,
@@ -863,10 +858,13 @@ def test_chat_completion_rejects_too_many_messages(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Field 'messages' exceeds the maximum "
-            "allowed count of 2"
-        ),
+        "detail": {
+            "code": "TOO_MANY_MESSAGES",
+            "message": (
+                "Field 'messages' exceeds the maximum "
+                "allowed count of 2"
+            ),
+        },
     }
 
 
@@ -874,7 +872,6 @@ def test_chat_completion_rejects_non_object_message(client):
     """
     Every message must be a JSON object.
     """
-
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -886,10 +883,13 @@ def test_chat_completion_rejects_non_object_message(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Message at index 0 "
-            "must be a JSON object"
-        ),
+        "detail": {
+            "code": "INVALID_MESSAGE",
+            "message": (
+                "Message at index 0 "
+                "must be a JSON object"
+            ),
+        },
     }
 
 
@@ -898,7 +898,6 @@ def test_chat_completion_rejects_oversized_message_content(client):
     Individual message content must stay within the configured
     character limit.
     """
-
     with patch(
         "app.main.settings.max_message_content_chars",
         10,
@@ -919,10 +918,13 @@ def test_chat_completion_rejects_oversized_message_content(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Message at index 0 content exceeds "
-            "the maximum allowed size of 10 characters"
-        ),
+        "detail": {
+            "code": "MESSAGE_CONTENT_TOO_LARGE",
+            "message": (
+                "Message at index 0 content exceeds "
+                "the maximum allowed size of 10 characters"
+            ),
+        },
     }
 
 
@@ -931,7 +933,6 @@ def test_chat_completion_rejects_oversized_total_content(client):
     Combined message content must stay within the configured
     total character limit.
     """
-
     with patch(
         "app.main.settings.max_total_message_content_chars",
         10,
@@ -956,18 +957,21 @@ def test_chat_completion_rejects_oversized_total_content(client):
     assert response.status_code == 400
 
     assert response.json() == {
-        "detail": (
-            "Total message content exceeds the maximum "
-            "allowed size of 10 characters"
-        ),
+        "detail": {
+            "code": "TOTAL_MESSAGE_CONTENT_TOO_LARGE",
+            "message": (
+                "Total message content exceeds the maximum "
+                "allowed size of 10 characters"
+            ),
+        },
     }
+
 
 def test_chat_completion_rejects_oversized_body(client):
     """
     Request bodies larger than the configured limit should
     return HTTP 413 before JSON parsing or provider execution.
     """
-
     original_limit = settings.max_request_body_bytes
     settings.max_request_body_bytes = 100
 
@@ -983,11 +987,49 @@ def test_chat_completion_rejects_oversized_body(client):
         assert response.status_code == 413
 
         assert response.json() == {
-            "detail": (
-                "Request body exceeds the maximum allowed size "
-                "of 100 bytes"
-            ),
+            "detail": {
+                "code": "REQUEST_BODY_TOO_LARGE",
+                "message": (
+                    "Request body exceeds the maximum allowed size "
+                    "of 100 bytes"
+                ),
+            },
         }
 
     finally:
         settings.max_request_body_bytes = original_limit
+def test_unexpected_exception_returns_safe_500():
+    """
+    Unexpected application exceptions should be converted into
+    a safe, consistent HTTP 500 response without leaking the
+    internal exception details.
+    """
+    settings.service_api_key = "test-service-key"
+
+    with patch(
+        "app.main.provider_registry.list",
+        side_effect=RuntimeError(
+            "secret internal failure"
+        ),
+    ):
+        with TestClient(
+            app,
+            headers={
+                "X-Agenyx-Service-Key": "test-service-key",
+            },
+            raise_server_exceptions=False,
+        ) as test_client:
+            response = test_client.get("/v1/providers")
+
+    assert response.status_code == 500
+
+    assert response.json() == {
+        "detail": {
+            "code": "INTERNAL_SERVER_ERROR",
+            "message": (
+                "An unexpected internal error occurred."
+            ),
+        },
+    }
+
+    assert "secret internal failure" not in response.text
