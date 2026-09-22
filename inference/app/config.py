@@ -23,6 +23,31 @@ class Settings(BaseSettings):
     #
     provider_names: str = "ollama-local"
 
+    # Per-provider backend configuration.
+    #
+    # Format:
+    #
+    # provider_name=base_url|api_key
+    #
+    # Multiple providers are separated by commas.
+    #
+    # Example:
+    #
+    # ollama-local=http://localhost:11434/v1|ollama,
+    # vllm-local=http://localhost:8001/v1|
+    #
+    provider_backends: str = (
+        "ollama-local=http://localhost:11434/v1|ollama"
+    )
+
+    # Model-specific provider failover routes.
+    #
+    # Format:
+    #
+    # model_id=provider1,provider2
+    #
+    model_failover_routes: str = ""
+
     # -----------------------------------------------------
     # Model configuration
     # -----------------------------------------------------
@@ -50,15 +75,12 @@ class Settings(BaseSettings):
     # -----------------------------------------------------
 
     # Default OpenAI-compatible backend configuration.
-    #
-    # Currently shared by configured providers.
-    # Per-provider backend configuration will be introduced
-    # separately.
     backend_base_url: str = "http://localhost:11434/v1"
 
     backend_api_key: str = "ollama"
 
     service_api_key: str = ""
+
     # -----------------------------------------------------
     # HTTP / retry configuration
     # -----------------------------------------------------
@@ -77,14 +99,16 @@ class Settings(BaseSettings):
 
     max_failover_attempts: int = 3
 
+    # -----------------------------------------------------
     # Tenant model access
+    # -----------------------------------------------------
 
-    tenant_model_access: str=(
+    tenant_model_access: str = (
         "tenant-a=qwen2.5:7b, llama3.2:3b;"
         "tenant-b=llama3.2:3b"
     )
 
-        # -----------------------------------------------------
+    # -----------------------------------------------------
     # Request validation / limits
     # -----------------------------------------------------
 
@@ -95,6 +119,7 @@ class Settings(BaseSettings):
     max_message_content_chars: int = 100_000
 
     max_total_message_content_chars: int = 500_000
+
     # -----------------------------------------------------
     # OpenTelemetry
     # -----------------------------------------------------
@@ -114,15 +139,73 @@ class Settings(BaseSettings):
 
     @property
     def providers(self) -> list[str]:
-        """
-        Return configured provider names in priority order.
-        """
+        """Return configured provider names in priority order."""
 
         return [
             name.strip()
             for name in self.provider_names.split(",")
             if name.strip()
         ]
+
+    @property
+    def provider_backend_configs(self) -> dict[str, dict[str, str]]:
+        """
+        Return backend configuration for each provider.
+
+        Format:
+
+            provider_name=base_url|api_key
+        """
+
+        configs: dict[str, dict[str, str]] = {}
+
+        for definition in self.provider_backends.split(","):
+            definition = definition.strip()
+
+            if not definition:
+                continue
+
+            provider_name, separator, backend = definition.partition("=")
+
+            if not separator:
+                raise ValueError(
+                    "Invalid provider backend definition "
+                    f"'{definition}'; "
+                    "expected 'provider_name=base_url|api_key'"
+                )
+
+            provider_name = provider_name.strip()
+
+            if not provider_name:
+                raise ValueError(
+                    "Provider backend definition contains "
+                    "an empty provider_name"
+                )
+
+            base_url, separator, api_key = backend.partition("|")
+
+            if not separator:
+                raise ValueError(
+                    "Invalid provider backend definition "
+                    f"'{definition}'; "
+                    "expected 'provider_name=base_url|api_key'"
+                )
+
+            base_url = base_url.strip()
+            api_key = api_key.strip()
+
+            if not base_url:
+                raise ValueError(
+                    "Provider backend definition contains "
+                    "an empty base_url"
+                )
+
+            configs[provider_name] = {
+                "base_url": base_url,
+                "api_key": api_key,
+            }
+
+        return configs
 
     @property
     def models(self) -> list[tuple[str, str]]:
@@ -170,10 +253,58 @@ class Settings(BaseSettings):
         return models
 
     @property
+    def model_failover_providers(self) -> dict[str, tuple[str, ...]]:
+        """
+        Return the ordered provider failover route for each model.
+
+        Format:
+
+            model_id=provider1,provider2
+        """
+
+        routes: dict[str, tuple[str, ...]] = {}
+
+        for definition in self.model_failover_routes.split(";"):
+            definition = definition.strip()
+
+            if not definition:
+                continue
+
+            model_id, separator, providers = definition.partition("=")
+
+            if not separator:
+                raise ValueError(
+                    "Invalid model failover definition "
+                    f"'{definition}'; "
+                    "expected 'model_id=provider1,provider2'"
+                )
+
+            model_id = model_id.strip()
+
+            if not model_id:
+                raise ValueError(
+                    "Model failover definition contains "
+                    "an empty model_id"
+                )
+
+            provider_names = tuple(
+                provider.strip()
+                for provider in providers.split(",")
+                if provider.strip()
+            )
+
+            if not provider_names:
+                raise ValueError(
+                    f"Model '{model_id}' has no providers"
+                )
+
+            routes[model_id] = provider_names
+
+        return routes
+
+    @property
     def tenant_models(self) -> dict[str, frozenset[str]]:
-        """
-        Return the models each tenant is allowed to use.
-        """
+        """Return the models each tenant is allowed to use."""
 
         access: dict[str, frozenset[str]] = {}
 
@@ -213,10 +344,9 @@ class Settings(BaseSettings):
 
         return access
 
+
 @lru_cache
 def get_settings() -> Settings:
-    """
-    Return cached application settings.
-    """
+    """Return cached application settings."""
 
     return Settings()

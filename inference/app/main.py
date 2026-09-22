@@ -128,10 +128,25 @@ for model_id, provider_name in settings.models:
 # FAILOVER
 # =========================================================
 
+model_routes: dict[str, tuple[str, ...]] = {
+    model_id: (provider_name,)
+    for model_id, provider_name in settings.models
+}
+
+for model_id, providers in settings.model_failover_providers.items():
+    if model_id not in model_routes:
+        raise ValueError(
+            f"Failover route references "
+            f"unregistered model '{model_id}'"
+        )
+
+    model_routes[model_id] = providers
+
+
 failover = FailoverManager(
     registry=provider_registry,
     reliability=reliability,
-    provider_order=settings.providers,
+    model_routes=model_routes,
     max_attempts=settings.max_failover_attempts,
 )
 
@@ -778,101 +793,61 @@ async def chat_completions(
         )
 
     # -----------------------------------------------------
-    # Resolve provider
+    # Execute inference with model-aware failover
     # -----------------------------------------------------
 
+    INFERENCE_REQUESTS_IN_PROGRESS.labels(
+        provider="failover",
+        model=model.model_id,
+    ).inc()
+
+    request_provider_start = time.perf_counter()
+
     try:
-        provider = provider_registry.get(
-            model.provider_name
+        result = await failover.chat_completion(
+            payload
         )
 
     except KeyError as exc:
         logger.error(
-            "Inference provider is not registered",
+            "Inference failover route is not configured",
             extra={
                 "model": model.model_id,
-                "provider": model.provider_name,
+                "error_type": type(exc).__name__,
             },
+            exc_info=True,
         )
 
         raise api_error(
             status_code=503,
-            code="PROVIDER_NOT_REGISTERED",
+            code="MODEL_UNAVAILABLE",
             message=(
-                f"Provider '{model.provider_name}' "
-                "is not registered"
+                f"No inference route is configured "
+                f"for model '{model.model_id}'"
             ),
         ) from exc
 
-    # -----------------------------------------------------
-    # Reliability
-    # -----------------------------------------------------
-
-    if not reliability.allow_request(provider.name):
-        logger.warning(
-            "Inference request rejected by reliability manager",
-            extra={
-                "model": model.model_id,
-                "provider": provider.name,
-            },
+    except RuntimeError as exc:
+        request_duration = (
+            time.perf_counter()
+            - request_provider_start
         )
 
         INFERENCE_REQUESTS_TOTAL.labels(
-            provider=provider.name,
-            model=model.model_id,
-            status="circuit_open",
-        ).inc()
-
-        raise api_error(
-            status_code=503,
-            code="PROVIDER_UNAVAILABLE",
-            message=(
-                f"Provider '{provider.name}' "
-                "is currently unavailable"
-            ),
-        )
-
-    # -----------------------------------------------------
-    # Execute inference
-    # -----------------------------------------------------
-
-    INFERENCE_REQUESTS_IN_PROGRESS.labels(
-        provider=provider.name,
-        model=model.model_id,
-    ).inc()
-
-    provider_start = time.perf_counter()
-
-    try:
-        response = await provider.chat_completion(
-            payload
-        )
-
-    except Exception as exc:
-        provider_duration = (
-            time.perf_counter() - provider_start
-        )
-
-        reliability.record_failure(
-            provider.name
-        )
-
-        INFERENCE_REQUESTS_TOTAL.labels(
-            provider=provider.name,
+            provider="failover",
             model=model.model_id,
             status="error",
         ).inc()
 
         INFERENCE_REQUEST_DURATION_SECONDS.labels(
-            provider=provider.name,
+            provider="failover",
             model=model.model_id,
-        ).observe(provider_duration)
+        ).observe(request_duration)
 
         logger.error(
-            "Inference request failed",
+            "Inference request exhausted failover providers",
             extra={
                 "model": model.model_id,
-                "provider": provider.name,
                 "error_type": type(exc).__name__,
                 "latency_ms": round(
                     (
@@ -890,36 +865,36 @@ async def chat_completions(
             status_code=503,
             code="INFERENCE_FAILED",
             message=(
-                f"Inference failed for provider "
-                f"'{provider.name}'"
+                f"Inference failed for model "
+                f"'{model.model_id}'"
             ),
         ) from exc
 
     else:
-        provider_duration = (
-            time.perf_counter() - provider_start
-        )
-
-        reliability.record_success(
-            provider.name
+        request_duration = (
+            time.perf_counter()
+            - request_provider_start
         )
 
         INFERENCE_REQUESTS_TOTAL.labels(
-            provider=provider.name,
+            provider=result.provider,
             model=model.model_id,
             status="success",
         ).inc()
 
         INFERENCE_REQUEST_DURATION_SECONDS.labels(
-            provider=provider.name,
+            provider=result.provider,
             model=model.model_id,
-        ).observe(provider_duration)
+        ).observe(request_duration)
 
     finally:
         INFERENCE_REQUESTS_IN_PROGRESS.labels(
-            provider=provider.name,
+            provider="failover",
             model=model.model_id,
         ).dec()
+
+    response = result.response
+    provider = result.provider
 
     # -----------------------------------------------------
     # Response
@@ -938,7 +913,7 @@ async def chat_completions(
         "Inference request completed",
         extra={
             "model": model.model_id,
-            "provider": provider.name,
+            "provider": provider,
             "latency_ms": latency_ms,
         },
     )
@@ -946,7 +921,7 @@ async def chat_completions(
     return JSONResponse(
         content=response,
         headers={
-            "X-Agenyx-Provider": provider.name,
+            "X-Agenyx-Provider": provider,
             "X-Agenyx-Model": model.model_id,
         },
     )

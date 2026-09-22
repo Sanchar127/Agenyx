@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Any
 
-from app.providers.base import InferenceProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
 
@@ -26,21 +25,23 @@ class FailoverResult:
 
 class FailoverManager:
     """
-    Executes inference requests across multiple providers.
+    Execute inference requests using model-specific provider routes.
 
-    Provider order is deterministic.
+    Each model has an ordered list of providers. Providers are
+    attempted in that order until one succeeds or the configured
+    attempt limit is reached.
 
     Example:
 
-        provider A
+        qwen2.5:7b
+            ↓
+        ollama-local
             ↓ failure
-        provider B
-            ↓ failure
-        provider C
+        vllm-local
             ↓ success
         return response
 
-    Providers whose circuit is OPEN are skipped immediately.
+    Providers whose circuit is OPEN are skipped.
     """
 
     def __init__(
@@ -48,13 +49,13 @@ class FailoverManager:
         *,
         registry: ProviderRegistry,
         reliability: ReliabilityManager,
-        provider_order: list[str],
+        model_routes: dict[str, tuple[str, ...]],
         max_attempts: int = 3,
     ) -> None:
 
-        if not provider_order:
+        if not model_routes:
             raise ValueError(
-                "provider_order must contain at least one provider"
+                "model_routes must contain at least one model"
             )
 
         if max_attempts < 1:
@@ -64,39 +65,88 @@ class FailoverManager:
 
         self.registry = registry
         self.reliability = reliability
-        self.provider_order = provider_order
+        self.model_routes = model_routes
         self.max_attempts = max_attempts
+
+        self._validate_routes()
+
+    def _validate_routes(self) -> None:
+        """Validate that every configured provider exists."""
+
+        registered_providers = set(
+            self.registry.list()
+        )
+
+        for model_id, providers in self.model_routes.items():
+
+            if not model_id.strip():
+                raise ValueError(
+                    "model_routes contains an empty model ID"
+                )
+
+            if not providers:
+                raise ValueError(
+                    f"Model '{model_id}' has no providers"
+                )
+
+            for provider_name in providers:
+                if provider_name not in registered_providers:
+                    raise ValueError(
+                        f"Model '{model_id}' references "
+                        f"unregistered provider "
+                        f"'{provider_name}'"
+                    )
+
+    def _providers_for_model(
+        self,
+        model_id: str,
+    ) -> tuple[str, ...]:
+        """Return the ordered provider route for a model."""
+
+        try:
+            return self.model_routes[model_id]
+
+        except KeyError as exc:
+            raise KeyError(
+                f"No failover route configured for model "
+                f"'{model_id}'"
+            ) from exc
 
     async def chat_completion(
         self,
         payload: dict[str, Any],
     ) -> FailoverResult:
         """
-        Execute a request with provider failover.
+        Execute a model-aware inference request.
 
-        Providers are attempted in configured order.
-
-        Providers whose circuit breaker does not allow traffic
-        are skipped.
-
-        If every eligible provider fails, the final provider
-        exception is raised.
+        The payload must contain a valid ``model`` field.
         """
+
+        model_id = payload.get("model")
+
+        if not isinstance(model_id, str) or not model_id:
+            raise ValueError(
+                "Inference payload must contain a "
+                "non-empty string 'model'"
+            )
+
+        providers = self._providers_for_model(
+            model_id
+        )
 
         attempts: list[FailoverAttempt] = []
         attempted_count = 0
         last_error: Exception | None = None
 
-        for provider_name in self.provider_order:
+        for provider_name in providers:
 
             if attempted_count >= self.max_attempts:
                 break
 
-            # The provider must exist.
-            provider = self.registry.get(provider_name)
+            provider = self.registry.get(
+                provider_name
+            )
 
-            # Circuit breaker decides whether this provider
-            # can receive traffic.
             if not self.reliability.allow_request(
                 provider.name
             ):
@@ -153,9 +203,11 @@ class FailoverManager:
 
         if last_error is not None:
             raise RuntimeError(
-                "All inference providers failed"
+                f"All failover providers failed for "
+                f"model '{model_id}'"
             ) from last_error
 
         raise RuntimeError(
-            "No inference providers are currently available"
+            f"No failover providers are currently "
+            f"available for model '{model_id}'"
         )

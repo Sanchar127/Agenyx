@@ -432,111 +432,16 @@ def test_chat_completion_streaming_not_implemented(client):
 
 
 # =========================================================
-# CHAT COMPLETIONS - PROVIDER RESOLUTION
-# =========================================================
-
-
-def test_chat_completion_provider_not_registered(client):
-    """
-    A model whose provider is not registered should return
-    HTTP 503.
-    """
-    fake_model = type(
-        "FakeModel",
-        (),
-        {
-            "model_id": "test-model",
-            "provider_name": "missing-provider",
-        },
-    )()
-
-    with patch(
-        "app.main.model_registry.get",
-        return_value=fake_model,
-    ):
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "test-model",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "hello",
-                    }
-                ],
-            },
-        )
-
-    assert response.status_code == 503
-
-    assert response.json() == {
-        "detail": {
-            "code": "PROVIDER_NOT_REGISTERED",
-            "message": (
-                "Provider 'missing-provider' "
-                "is not registered"
-            ),
-        },
-    }
-
-
-# =========================================================
-# CHAT COMPLETIONS - RELIABILITY
-# =========================================================
-
-
-def test_chat_completion_rejected_by_reliability(client):
-    """
-    Requests must fail fast when the reliability manager
-    does not allow traffic to the provider.
-    """
-    mock_provider = AsyncMock()
-    mock_provider.name = "ollama-local"
-
-    with patch(
-        "app.main.provider_registry.get",
-        return_value=mock_provider,
-    ), patch(
-        "app.main.reliability.allow_request",
-        return_value=False,
-    ):
-        response = client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "qwen2.5:7b",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "hello",
-                    }
-                ],
-            },
-        )
-
-    assert response.status_code == 503
-
-    assert response.json() == {
-        "detail": {
-            "code": "PROVIDER_UNAVAILABLE",
-            "message": (
-                "Provider 'ollama-local' "
-                "is currently unavailable"
-            ),
-        },
-    }
-
-    mock_provider.chat_completion.assert_not_awaited()
-
-
-# =========================================================
-# CHAT COMPLETIONS - SUCCESS
+# CHAT COMPLETIONS - FAILOVER INTEGRATION
 # =========================================================
 
 
 def test_chat_completion_success(client):
     """
-    A successful provider response should be returned to the
-    client unchanged.
+    A successful FailoverManager response should be returned
+    to the client unchanged.
+
+    Provider selection itself is tested in test_failover.py.
     """
     fake_response = {
         "id": "chatcmpl-test",
@@ -554,19 +459,20 @@ def test_chat_completion_success(client):
         ],
     }
 
-    mock_provider = AsyncMock()
-    mock_provider.name = "ollama-local"
-    mock_provider.chat_completion.return_value = fake_response
+    mock_result = type(
+        "FakeFailoverResult",
+        (),
+        {
+            "response": fake_response,
+            "provider": "ollama-local",
+        },
+    )()
 
     with patch(
-        "app.main.provider_registry.get",
-        return_value=mock_provider,
-    ), patch(
-        "app.main.reliability.allow_request",
-        return_value=True,
-    ), patch(
-        "app.main.reliability.record_success"
-    ) as mock_record_success:
+        "app.main.failover.chat_completion",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ) as mock_failover:
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -587,17 +493,23 @@ def test_chat_completion_success(client):
     assert response.headers["X-Agenyx-Provider"] == "ollama-local"
     assert response.headers["X-Agenyx-Model"] == "qwen2.5:7b"
 
-    mock_provider.chat_completion.assert_awaited_once()
-
-    mock_record_success.assert_called_once_with(
-        "ollama-local"
+    mock_failover.assert_awaited_once_with(
+        {
+            "model": "qwen2.5:7b",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello",
+                }
+            ],
+        }
     )
 
 
-def test_chat_completion_passes_payload_to_provider(client):
+def test_chat_completion_passes_payload_to_failover_manager(client):
     """
-    The resolved model and original messages should be passed
-    to the provider.
+    The endpoint should pass the validated request payload to
+    FailoverManager unchanged.
     """
     fake_response = {
         "id": "test",
@@ -605,69 +517,59 @@ def test_chat_completion_passes_payload_to_provider(client):
         "choices": [],
     }
 
-    mock_provider = AsyncMock()
-    mock_provider.name = "ollama-local"
-    mock_provider.chat_completion.return_value = fake_response
+    mock_result = type(
+        "FakeFailoverResult",
+        (),
+        {
+            "response": fake_response,
+            "provider": "ollama-local",
+        },
+    )()
+
+    payload = {
+        "model": "qwen2.5:7b",
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+            }
+        ],
+        "temperature": 0.7,
+    }
 
     with patch(
-        "app.main.provider_registry.get",
-        return_value=mock_provider,
-    ):
+        "app.main.failover.chat_completion",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ) as mock_failover:
         response = client.post(
             "/v1/chat/completions",
-            json={
-                "model": "qwen2.5:7b",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": "hello",
-                    }
-                ],
-                "temperature": 0.7,
-            },
+            json=payload,
         )
 
     assert response.status_code == 200
 
-    mock_provider.chat_completion.assert_awaited_once()
-
-    payload = mock_provider.chat_completion.await_args.args[0]
-
-    assert payload["model"] == "qwen2.5:7b"
-
-    assert payload["messages"] == [
-        {
-            "role": "user",
-            "content": "hello",
-        }
-    ]
-
-    assert payload["temperature"] == 0.7
+    mock_failover.assert_awaited_once_with(payload)
 
 
 # =========================================================
-# CHAT COMPLETIONS - FAILURE
+# CHAT COMPLETIONS - FAILOVER EXHAUSTION
 # =========================================================
 
 
-def test_chat_completion_provider_failure(client):
+def test_chat_completion_failover_exhausted(client):
     """
-    Provider exceptions should be converted to HTTP 503
-    and recorded as reliability failures.
+    When FailoverManager exhausts all providers, the endpoint
+    should return HTTP 503.
     """
-    mock_provider = AsyncMock()
-    mock_provider.name = "ollama-local"
-
-    mock_provider.chat_completion.side_effect = RuntimeError(
-        "backend unavailable"
-    )
-
     with patch(
-        "app.main.provider_registry.get",
-        return_value=mock_provider,
-    ), patch(
-        "app.main.reliability.record_failure"
-    ) as mock_record_failure:
+        "app.main.failover.chat_completion",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError(
+            "All failover providers failed for model "
+            "'qwen2.5:7b'"
+        ),
+    ) as mock_failover:
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -687,38 +589,79 @@ def test_chat_completion_provider_failure(client):
         "detail": {
             "code": "INFERENCE_FAILED",
             "message": (
-                "Inference failed for provider "
-                "'ollama-local'"
+                "Inference failed for model "
+                "'qwen2.5:7b'"
             ),
         },
     }
 
-    mock_record_failure.assert_called_once_with(
-        "ollama-local"
-    )
+    mock_failover.assert_awaited_once()
 
 
-def test_chat_completion_does_not_record_success_on_failure(
+def test_chat_completion_does_not_record_reliability_directly(
     client,
 ):
     """
-    A failed inference must never be recorded as a success.
-    """
-    mock_provider = AsyncMock()
-    mock_provider.name = "ollama-local"
+    Reliability bookkeeping belongs to FailoverManager.
 
-    mock_provider.chat_completion.side_effect = RuntimeError(
-        "backend unavailable"
-    )
+    The HTTP endpoint must not directly call record_success
+    or record_failure.
+    """
+    fake_response = {
+        "id": "test",
+        "object": "chat.completion",
+        "choices": [],
+    }
+
+    mock_result = type(
+        "FakeFailoverResult",
+        (),
+        {
+            "response": fake_response,
+            "provider": "ollama-local",
+        },
+    )()
 
     with patch(
-        "app.main.provider_registry.get",
-        return_value=mock_provider,
-    ), patch(
-        "app.main.reliability.record_failure"
+        "app.main.failover.chat_completion",
+        new_callable=AsyncMock,
+        return_value=mock_result,
     ), patch(
         "app.main.reliability.record_success"
-    ) as mock_record_success:
+    ) as mock_record_success, patch(
+        "app.main.reliability.record_failure"
+    ) as mock_record_failure:
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hello",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+
+    mock_record_success.assert_not_called()
+    mock_record_failure.assert_not_called()
+
+
+def test_chat_completion_unconfigured_failover_route(client):
+    """
+    A missing failover route should be converted into HTTP 503.
+    """
+    with patch(
+        "app.main.failover.chat_completion",
+        new_callable=AsyncMock,
+        side_effect=KeyError(
+            "No failover route configured for model "
+            "'qwen2.5:7b'"
+        ),
+    ) as mock_failover:
         response = client.post(
             "/v1/chat/completions",
             json={
@@ -734,7 +677,17 @@ def test_chat_completion_does_not_record_success_on_failure(
 
     assert response.status_code == 503
 
-    mock_record_success.assert_not_called()
+    assert response.json() == {
+        "detail": {
+            "code": "MODEL_UNAVAILABLE",
+            "message": (
+                "No inference route is configured "
+                "for model 'qwen2.5:7b'"
+            ),
+        },
+    }
+
+    mock_failover.assert_awaited_once()
 
 
 # =========================================================
@@ -998,6 +951,13 @@ def test_chat_completion_rejects_oversized_body(client):
 
     finally:
         settings.max_request_body_bytes = original_limit
+
+
+# =========================================================
+# UNEXPECTED EXCEPTIONS
+# =========================================================
+
+
 def test_unexpected_exception_returns_safe_500():
     """
     Unexpected application exceptions should be converted into

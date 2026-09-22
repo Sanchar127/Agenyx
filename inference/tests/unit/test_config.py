@@ -116,3 +116,152 @@ def test_tenant_model_access_rejects_empty_models():
         raise AssertionError(
             "Expected empty tenant model access to fail"
         )
+
+def test_provider_backends_parse():
+    settings = Settings(
+        provider_backends=(
+            "ollama-local=http://localhost:11434/v1|ollama,"
+            "vllm-local=http://localhost:8001/v1|vllm-key"
+        )
+    )
+
+    assert settings.provider_backend_configs == {
+        "ollama-local": {
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "ollama",
+        },
+        "vllm-local": {
+            "base_url": "http://localhost:8001/v1",
+            "api_key": "vllm-key",
+        },
+    }
+
+
+def test_provider_backends_parse_without_api_key():
+    settings = Settings(
+        provider_backends=(
+            "ollama-local=http://localhost:11434/v1|,"
+            "vllm-local=http://localhost:8001/v1|"
+        )
+    )
+
+    assert settings.provider_backend_configs == {
+        "ollama-local": {
+            "base_url": "http://localhost:11434/v1",
+            "api_key": "",
+        },
+        "vllm-local": {
+            "base_url": "http://localhost:8001/v1",
+            "api_key": "",
+        },
+    }
+
+
+def test_provider_backends_reject_missing_separator():
+    settings = Settings(
+        provider_backends="ollama-local"
+    )
+
+    try:
+        settings.provider_backend_configs
+    except ValueError as exc:
+        assert "expected 'provider_name=base_url|api_key'" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected invalid provider backend definition to fail"
+        )
+
+
+def test_provider_backends_reject_empty_provider():
+    settings = Settings(
+        provider_backends="=http://localhost:11434/v1|ollama"
+    )
+
+    try:
+        settings.provider_backend_configs
+    except ValueError as exc:
+        assert "empty provider_name" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty provider name to fail"
+        )
+
+
+def test_provider_backends_reject_empty_base_url():
+    settings = Settings(
+        provider_backends="ollama-local=|ollama"
+    )
+
+    try:
+        settings.provider_backend_configs
+    except ValueError as exc:
+        assert "empty base_url" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty provider base URL to fail"
+        )
+
+
+def test_model_failover_routes_parse():
+    settings = Settings(
+        model_failover_routes=(
+            "qwen2.5:7b=ollama-local,vllm-local;"
+            "llama3.2:3b=ollama-local,vllm-local"
+        )
+    )
+
+    assert settings.model_failover_providers == {
+        "qwen2.5:7b": (
+            "ollama-local",
+            "vllm-local",
+        ),
+        "llama3.2:3b": (
+            "ollama-local",
+            "vllm-local",
+        ),
+    }
+
+
+def test_model_failover_routes_reject_missing_separator():
+    settings = Settings(
+        model_failover_routes="qwen2.5:7b"
+    )
+
+    try:
+        settings.model_failover_providers
+    except ValueError as exc:
+        assert "expected 'model_id=provider1,provider2'" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected invalid model failover route to fail"
+        )
+
+
+def test_model_failover_routes_reject_empty_model():
+    settings = Settings(
+        model_failover_routes="=ollama-local,vllm-local"
+    )
+
+    try:
+        settings.model_failover_providers
+    except ValueError as exc:
+        assert "empty model_id" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty model ID to fail"
+        )
+
+
+def test_model_failover_routes_reject_empty_providers():
+    settings = Settings(
+        model_failover_routes="qwen2.5:7b="
+    )
+
+    try:
+        settings.model_failover_providers
+    except ValueError as exc:
+        assert "has no providers" in str(exc)
+    else:
+        raise AssertionError(
+            "Expected empty provider list to fail"
+        )
