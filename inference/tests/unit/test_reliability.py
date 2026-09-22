@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Barrier
 
 import pytest
 
@@ -308,6 +310,67 @@ def test_failed_half_open_probe_reopens_circuit(
     assert state.circuit_state == CircuitState.OPEN
     assert state.status == ProviderStatus.UNHEALTHY
     assert state.circuit_opened_at is not None
+
+
+def test_concurrent_half_open_allows_only_one_probe(
+    registered_manager: ReliabilityManager,
+):
+    manager = registered_manager
+
+    # Open the circuit.
+    for _ in range(3):
+        manager.record_failure("provider-a")
+
+    # Move the circuit into HALF_OPEN.
+    state = manager.get("provider-a")
+    state.circuit_opened_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=11)
+    )
+
+    # Mutate the real manager state through the lock.
+    with manager._lock:
+        manager._states["provider-a"].circuit_opened_at = (
+            datetime.now(timezone.utc) - timedelta(seconds=11)
+        )
+
+    workers = 10
+    barrier = Barrier(workers)
+
+    def attempt() -> bool:
+        barrier.wait()
+        return manager.allow_request("provider-a")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(lambda _: attempt(), range(workers)))
+
+    assert results.count(True) == 1
+    assert results.count(False) == workers - 1
+
+    state = manager.get("provider-a")
+    assert state.circuit_state == CircuitState.HALF_OPEN
+
+
+def test_concurrent_failures_preserve_all_failure_counts(
+    registered_manager: ReliabilityManager,
+):
+    manager = registered_manager
+
+    workers = 20
+    barrier = Barrier(workers)
+
+    def record_failure() -> None:
+        barrier.wait()
+        manager.record_failure("provider-a")
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        list(executor.map(lambda _: record_failure(), range(workers)))
+
+    state = manager.get("provider-a")
+
+    assert state.total_failures == workers
+    assert state.consecutive_failures == workers
+    assert state.status == ProviderStatus.UNHEALTHY
+    assert state.circuit_state == CircuitState.OPEN
 
 
 # =========================================================

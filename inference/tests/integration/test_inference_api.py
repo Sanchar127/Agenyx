@@ -351,8 +351,8 @@ async def test_chat_completion_provider_failure(client):
         "detail": {
             "code": "INFERENCE_FAILED",
             "message": (
-                "Inference failed for provider "
-                "'ollama-local'"
+                "Inference failed for model "
+                "'qwen2.5:7b'"
             ),
         },
     }
