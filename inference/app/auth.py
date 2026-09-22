@@ -11,6 +11,12 @@ async def require_service_auth(
     """Require a valid Agent to Inference service credential."""
     settings = get_settings()
 
+    print(
+        "AUTH DEBUG:",
+        repr(x_agenyx_service_key),
+        repr(settings.service_api_key),
+    )
+
     if not settings.service_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

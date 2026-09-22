@@ -7,17 +7,6 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app, reliability
 
 
-@pytest_asyncio.fixture
-async def client():
-    transport = ASGITransport(app=app)
-
-    async with AsyncClient(
-        transport=transport,
-        base_url="http://test",
-    ) as client:
-        yield client
-
-
 @pytest.fixture(autouse=True)
 def reset_reliability():
     provider_name = "ollama-local"
