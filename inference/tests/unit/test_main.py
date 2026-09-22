@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.concurrency import InferenceConcurrencyLimiter
 from app.main import (
     app,
     failover,
@@ -807,6 +808,129 @@ def test_chat_completion_unconfigured_failover_route(client):
     }
 
     mock_failover.assert_awaited_once()
+
+
+# =========================================================
+# CONCURRENCY
+# =========================================================
+
+
+def test_chat_completion_returns_429_when_concurrency_limit_reached(
+    client,
+):
+    """
+    A request should receive HTTP 429 when all inference
+    concurrency slots are already occupied.
+    """
+    limiter = InferenceConcurrencyLimiter(1)
+
+    payload = {
+        "model": "qwen2.5:7b",
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+            }
+        ],
+    }
+
+    assert limiter.try_acquire() is True
+
+    try:
+        with (
+            patch(
+                "app.main.concurrency_limiter",
+                limiter,
+            ),
+            patch(
+                "app.main.failover.chat_completion",
+                new_callable=AsyncMock,
+            ) as mock_failover,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json=payload,
+            )
+
+        assert response.status_code == 429
+
+        assert response.json() == {
+            "detail": {
+                "code": "INFERENCE_CONCURRENCY_LIMIT",
+                "message": (
+                    "Inference concurrency limit reached"
+                ),
+            },
+        }
+
+        mock_failover.assert_not_awaited()
+
+    finally:
+        limiter.release()
+
+
+def test_chat_completion_releases_concurrency_slot_after_failure(
+    client,
+):
+    """
+    A failed inference request must release its concurrency
+    slot so that subsequent requests can execute.
+    """
+    limiter = InferenceConcurrencyLimiter(1)
+
+    payload = {
+        "model": "qwen2.5:7b",
+        "messages": [
+            {
+                "role": "user",
+                "content": "hello",
+            }
+        ],
+    }
+
+    with patch(
+        "app.main.concurrency_limiter",
+        limiter,
+    ):
+        with patch(
+            "app.main.failover.chat_completion",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("provider failed"),
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json=payload,
+            )
+
+        assert response.status_code == 503
+        assert limiter.active == 0
+
+        fake_result = type(
+            "FakeFailoverResult",
+            (),
+            {
+                "response": {
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "model": "qwen2.5:7b",
+                    "choices": [],
+                },
+                "provider": "ollama-local",
+            },
+        )()
+
+        with patch(
+            "app.main.failover.chat_completion",
+            new_callable=AsyncMock,
+            return_value=fake_result,
+        ):
+            response = client.post(
+                "/v1/chat/completions",
+                json=payload,
+            )
+
+        assert response.status_code == 200
+        assert limiter.active == 0
 
 
 # =========================================================

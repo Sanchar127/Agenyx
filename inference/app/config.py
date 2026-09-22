@@ -93,6 +93,9 @@ class Settings(BaseSettings):
 
     max_keepalive_connections: int = 20
 
+    # max_inference_concurrency: int = 10
+
+    max_concurrency: int = 10
     # -----------------------------------------------------
     # Failover
     # -----------------------------------------------------

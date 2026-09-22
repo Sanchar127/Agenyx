@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.auth import require_service_auth
+from app.concurrency import InferenceConcurrencyLimiter
 from app.config import get_settings
 from app.failover.manager import FailoverManager
 from app.logger import logger
@@ -65,6 +66,10 @@ def api_error(
 
 settings = get_settings()
 
+concurrency_limiter = InferenceConcurrencyLimiter(
+    settings.max_concurrency
+)
+
 
 # =========================================================
 # REGISTRIES
@@ -97,7 +102,9 @@ for provider_name in settings.providers:
             api_key=settings.backend_api_key,
             timeout=settings.request_timeout_seconds,
             max_connections=settings.max_connections,
-            max_keepalive_connections=settings.max_keepalive_connections,
+            max_keepalive_connections=(
+                settings.max_keepalive_connections
+            ),
             max_retries=settings.max_retries,
         )
     )
@@ -793,6 +800,26 @@ async def chat_completions(
         )
 
     # -----------------------------------------------------
+    # Concurrency admission
+    # -----------------------------------------------------
+
+    if not concurrency_limiter.try_acquire():
+        logger.warning(
+            "Inference concurrency limit reached",
+            extra={
+                "model": model.model_id,
+                "max_concurrency": concurrency_limiter.max_concurrency,
+                "active_requests": concurrency_limiter.active,
+            },
+        )
+
+        raise api_error(
+            status_code=429,
+            code="INFERENCE_CONCURRENCY_LIMIT",
+            message="Inference concurrency limit reached",
+        )
+
+    # -----------------------------------------------------
     # Execute inference with model-aware failover
     # -----------------------------------------------------
 
@@ -892,6 +919,8 @@ async def chat_completions(
             provider="failover",
             model=model.model_id,
         ).dec()
+
+        concurrency_limiter.release()
 
     response = result.response
     provider = result.provider
