@@ -3,7 +3,14 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, model_registry, reliability, settings
+from app.main import (
+    app,
+    failover,
+    model_registry,
+    provider_registry,
+    reliability,
+    settings,
+)
 
 
 # =========================================================
@@ -504,6 +511,118 @@ def test_chat_completion_success(client):
             ],
         }
     )
+
+
+def test_chat_completion_real_failover(client):
+    """
+    The real HTTP endpoint should execute provider failover.
+
+    provider-a fails, provider-b succeeds, and the successful
+    provider should be returned in the response headers.
+    """
+
+    class FakeProvider:
+        def __init__(
+            self,
+            name: str,
+            *,
+            error: Exception | None = None,
+        ) -> None:
+            self._name = name
+            self.error = error
+            self.calls = 0
+
+        @property
+        def name(self) -> str:
+            return self._name
+
+        async def chat_completion(
+            self,
+            payload: dict,
+        ) -> dict:
+            self.calls += 1
+
+            if self.error is not None:
+                raise self.error
+
+            return {
+                "id": "chatcmpl-failover",
+                "object": "chat.completion",
+                "model": payload["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "failover success",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+
+        async def health(self) -> bool:
+            return True
+
+        async def close(self) -> None:
+            return None
+
+    provider_a = FakeProvider(
+        "provider-a",
+        error=RuntimeError("provider-a failed"),
+    )
+    provider_b = FakeProvider("provider-b")
+
+    original_providers = provider_registry._providers
+    original_routes = failover.model_routes
+
+    try:
+        provider_registry._providers = {
+            "provider-a": provider_a,
+            "provider-b": provider_b,
+        }
+
+        failover.model_routes = {
+            "qwen2.5:7b": (
+                "provider-a",
+                "provider-b",
+            ),
+        }
+
+        reliability.register("provider-a")
+        reliability.register("provider-b")
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hello",
+                    }
+                ],
+            },
+        )
+
+    finally:
+        provider_registry._providers = original_providers
+        failover.model_routes = original_routes
+
+        reliability._states.pop("provider-a", None)
+        reliability._states.pop("provider-b", None)
+
+    assert response.status_code == 200
+
+    assert response.json()["choices"][0]["message"]["content"] == (
+        "failover success"
+    )
+
+    assert response.headers["X-Agenyx-Provider"] == "provider-b"
+    assert response.headers["X-Agenyx-Model"] == "qwen2.5:7b"
+
+    assert provider_a.calls == 1
+    assert provider_b.calls == 1
 
 
 def test_chat_completion_passes_payload_to_failover_manager(client):

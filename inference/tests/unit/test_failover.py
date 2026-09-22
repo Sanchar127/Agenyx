@@ -138,7 +138,8 @@ def test_rejects_unknown_provider(
         )
 
 
-def test_rejects_unknown_model_route(
+@pytest.mark.asyncio
+async def test_rejects_unknown_model_route(
     reliability: ReliabilityManager,
 ):
     provider = FakeProvider("provider-a")
@@ -155,12 +156,9 @@ def test_rejects_unknown_model_route(
         KeyError,
         match="No failover route configured for model 'model-b'",
     ):
-        await_completion(
-            manager,
+        await manager.chat_completion(
             {"model": "model-b"},
         )
-
-
 # =========================================================
 # SUCCESS
 # =========================================================
@@ -570,16 +568,3 @@ async def test_empty_model_rejected(
         await manager.chat_completion(
             {"model": ""},
         )
-
-
-def await_completion(
-    manager: FailoverManager,
-    payload: dict,
-):
-    """Helper used by the synchronous unknown-model test."""
-
-    import asyncio
-
-    return asyncio.run(
-        manager.chat_completion(payload),
-    )
