@@ -837,3 +837,157 @@ def reset_reliability():
     reliability._half_open_probe.clear()
 
     yield
+
+def test_chat_completion_rejects_too_many_messages(client):
+    """
+    Requests exceeding the configured message count limit
+    should return HTTP 400.
+    """
+
+    with patch(
+        "app.main.settings.max_messages",
+        2,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {"role": "user", "content": "one"},
+                    {"role": "user", "content": "two"},
+                    {"role": "user", "content": "three"},
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+
+    assert response.json() == {
+        "detail": (
+            "Field 'messages' exceeds the maximum "
+            "allowed count of 2"
+        ),
+    }
+
+
+def test_chat_completion_rejects_non_object_message(client):
+    """
+    Every message must be a JSON object.
+    """
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "qwen2.5:7b",
+            "messages": ["hello"],
+        },
+    )
+
+    assert response.status_code == 400
+
+    assert response.json() == {
+        "detail": (
+            "Message at index 0 "
+            "must be a JSON object"
+        ),
+    }
+
+
+def test_chat_completion_rejects_oversized_message_content(client):
+    """
+    Individual message content must stay within the configured
+    character limit.
+    """
+
+    with patch(
+        "app.main.settings.max_message_content_chars",
+        10,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "a" * 11,
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+
+    assert response.json() == {
+        "detail": (
+            "Message at index 0 content exceeds "
+            "the maximum allowed size of 10 characters"
+        ),
+    }
+
+
+def test_chat_completion_rejects_oversized_total_content(client):
+    """
+    Combined message content must stay within the configured
+    total character limit.
+    """
+
+    with patch(
+        "app.main.settings.max_total_message_content_chars",
+        10,
+    ):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "hello",
+                    },
+                    {
+                        "role": "user",
+                        "content": "world!",
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 400
+
+    assert response.json() == {
+        "detail": (
+            "Total message content exceeds the maximum "
+            "allowed size of 10 characters"
+        ),
+    }
+
+def test_chat_completion_rejects_oversized_body(client):
+    """
+    Request bodies larger than the configured limit should
+    return HTTP 413 before JSON parsing or provider execution.
+    """
+
+    original_limit = settings.max_request_body_bytes
+    settings.max_request_body_bytes = 100
+
+    try:
+        response = client.post(
+            "/v1/chat/completions",
+            content=b"x" * 101,
+            headers={
+                "Content-Type": "application/json",
+            },
+        )
+
+        assert response.status_code == 413
+
+        assert response.json() == {
+            "detail": (
+                "Request body exceeds the maximum allowed size "
+                "of 100 bytes"
+            ),
+        }
+
+    finally:
+        settings.max_request_body_bytes = original_limit

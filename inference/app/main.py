@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
 from app.auth import require_service_auth
 from app.config import get_settings
 from app.failover.manager import FailoverManager
@@ -23,6 +24,7 @@ from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
 from app.telemetry import configure_telemetry, instrument_app
+
 
 # =========================================================
 # SETTINGS
@@ -88,6 +90,7 @@ for model_id, provider_name in settings.models:
         )
     )
 
+
 # =========================================================
 # FAILOVER
 # =========================================================
@@ -98,6 +101,13 @@ failover = FailoverManager(
     provider_order=settings.providers,
     max_attempts=settings.max_failover_attempts,
 )
+
+
+# =========================================================
+# TELEMETRY
+# =========================================================
+
+tracer_provider = configure_telemetry(settings)
 
 
 # =========================================================
@@ -139,11 +149,6 @@ async def lifespan(app: FastAPI):
 
     logger.info("Inference telemetry shut down")
 
-# =========================================================
-# TELEMETRY
-# =========================================================
-
-tracer_provider = configure_telemetry(settings)
 
 # =========================================================
 # APPLICATION
@@ -156,6 +161,8 @@ app = FastAPI(
 )
 
 instrument_app(app)
+
+
 # =========================================================
 # HTTP OBSERVABILITY
 # =========================================================
@@ -411,7 +418,7 @@ async def models() -> dict[str, Any]:
 )
 async def chat_completions(
     request: Request,
-    _:None = Depends(require_service_auth),
+    _: None = Depends(require_service_auth),
 ) -> JSONResponse:
     """
     OpenAI-compatible chat completion endpoint.
@@ -422,6 +429,39 @@ async def chat_completions(
     # -----------------------------------------------------
     # Parse JSON
     # -----------------------------------------------------
+
+    try:
+        body = await request.body()
+
+    except Exception as exc:
+        logger.warning(
+            "Failed to read inference request body",
+            extra={
+                "error_type": type(exc).__name__,
+            },
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail="Unable to read request body",
+        ) from exc
+
+    if len(body) > settings.max_request_body_bytes:
+        logger.warning(
+            "Inference request body exceeds configured limit",
+            extra={
+                "body_bytes": len(body),
+                "max_body_bytes": settings.max_request_body_bytes,
+            },
+        )
+
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Request body exceeds the maximum allowed size "
+                f"of {settings.max_request_body_bytes} bytes"
+            ),
+        )
 
     try:
         payload = await request.json()
@@ -465,6 +505,113 @@ async def chat_completions(
             detail=(
                 "Field 'messages' must be a "
                 "non-empty list"
+            ),
+        )
+
+    if len(messages) > settings.max_messages:
+        logger.warning(
+            "Inference request exceeds maximum message count",
+            extra={
+                "message_count": len(messages),
+                "max_messages": settings.max_messages,
+            },
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Field 'messages' exceeds the maximum allowed "
+                f"count of {settings.max_messages}"
+            ),
+        )
+
+    total_content_chars = 0
+
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            logger.warning(
+                "Inference request contains invalid message",
+                extra={
+                    "message_index": index,
+                },
+            )
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Message at index {index} "
+                    "must be a JSON object"
+                ),
+            )
+
+        content = message.get("content")
+
+        if content is None:
+            continue
+
+        if not isinstance(content, str):
+            logger.warning(
+                "Inference request contains invalid message content",
+                extra={
+                    "message_index": index,
+                },
+            )
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Message at index {index} "
+                    "'content' must be a string"
+                ),
+            )
+
+        content_chars = len(content)
+
+        if content_chars > settings.max_message_content_chars:
+            logger.warning(
+                "Inference message content exceeds configured limit",
+                extra={
+                    "message_index": index,
+                    "content_chars": content_chars,
+                    "max_content_chars": (
+                        settings.max_message_content_chars
+                    ),
+                },
+            )
+
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Message at index {index} content exceeds "
+                    "the maximum allowed size of "
+                    f"{settings.max_message_content_chars} "
+                    "characters"
+                ),
+            )
+
+        total_content_chars += content_chars
+
+    if (
+        total_content_chars
+        > settings.max_total_message_content_chars
+    ):
+        logger.warning(
+            "Inference request exceeds total message content limit",
+            extra={
+                "total_content_chars": total_content_chars,
+                "max_total_content_chars": (
+                    settings.max_total_message_content_chars
+                ),
+            },
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Total message content exceeds the maximum "
+                "allowed size of "
+                f"{settings.max_total_message_content_chars} "
+                "characters"
             ),
         )
 

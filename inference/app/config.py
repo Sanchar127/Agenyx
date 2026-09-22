@@ -83,6 +83,18 @@ class Settings(BaseSettings):
         "tenant-a=qwen2.5:7b, llama3.2:3b;"
         "tenant-b=llama3.2:3b"
     )
+
+        # -----------------------------------------------------
+    # Request validation / limits
+    # -----------------------------------------------------
+
+    max_request_body_bytes: int = 1_048_576
+
+    max_messages: int = 100
+
+    max_message_content_chars: int = 100_000
+
+    max_total_message_content_chars: int = 500_000
     # -----------------------------------------------------
     # OpenTelemetry
     # -----------------------------------------------------

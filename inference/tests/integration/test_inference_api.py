@@ -116,6 +116,110 @@ async def test_chat_completion_end_to_end(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_completion_cannot_override_provider_url(client):
+    expected_response = {
+        "id": "chatcmpl-ssrf-test",
+        "object": "chat.completion",
+        "choices": [],
+    }
+
+    with patch(
+        "app.main.provider_registry.get"
+    ) as mock_get:
+        provider = mock_get.return_value
+        provider.name = "ollama-local"
+
+        provider.chat_completion = AsyncMock(
+            return_value=expected_response
+        )
+
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello",
+                    }
+                ],
+                "base_url": "http://169.254.169.254",
+                "provider_url": "http://attacker.example",
+                "endpoint": "http://attacker.example",
+            },
+        )
+
+    assert response.status_code == 200
+
+    provider.chat_completion.assert_awaited_once()
+
+    payload = provider.chat_completion.call_args.args[0]
+
+    assert payload["model"] == "qwen2.5:7b"
+    assert payload["messages"][0]["content"] == "Hello"
+
+    # These fields must never be interpreted as provider-routing controls.
+    assert payload["base_url"] == "http://169.254.169.254"
+    assert payload["provider_url"] == "http://attacker.example"
+    assert payload["endpoint"] == "http://attacker.example"
+
+    # Provider selection remains configuration/model-registry driven.
+    mock_get.assert_called_once_with("ollama-local")
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_cannot_override_provider_url(client):
+    expected_response = {
+        "id": "chatcmpl-ssrf-test",
+        "object": "chat.completion",
+        "choices": [],
+    }
+
+    with patch(
+        "app.main.provider_registry.get"
+    ) as mock_get:
+        provider = mock_get.return_value
+        provider.name = "ollama-local"
+
+        provider.chat_completion = AsyncMock(
+            return_value=expected_response
+        )
+
+        response = await client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "qwen2.5:7b",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Hello",
+                    }
+                ],
+                "base_url": "http://169.254.169.254",
+                "provider_url": "http://attacker.example",
+                "endpoint": "http://attacker.example",
+            },
+        )
+
+    assert response.status_code == 200
+
+    provider.chat_completion.assert_awaited_once()
+
+    payload = provider.chat_completion.call_args.args[0]
+
+    assert payload["model"] == "qwen2.5:7b"
+    assert payload["messages"][0]["content"] == "Hello"
+
+    # These fields must never be interpreted as provider-routing controls.
+    assert payload["base_url"] == "http://169.254.169.254"
+    assert payload["provider_url"] == "http://attacker.example"
+    assert payload["endpoint"] == "http://attacker.example"
+
+    # Provider selection remains configuration/model-registry driven.
+    mock_get.assert_called_once_with("ollama-local")
+
+
+@pytest.mark.asyncio
 async def test_chat_completion_default_model(client):
     expected_response = {
         "id": "chatcmpl-default",

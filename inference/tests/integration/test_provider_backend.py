@@ -227,3 +227,72 @@ async def test_provider_health_uses_backend_health():
     mock_health.assert_awaited_once()
 
     await provider.close()
+
+@pytest.mark.asyncio
+async def test_backend_ignores_request_base_url_override():
+    backend = OpenAICompatibleBackend(
+        provider_name="test-provider",
+        base_url="http://trusted-inference:11434/v1",
+        api_key="test-key",
+        timeout=5.0,
+        max_connections=10,
+        max_keepalive_connections=5,
+        max_retries=0,
+    )
+
+    expected_response = {
+        "id": "chatcmpl-ssrf-test",
+        "object": "chat.completion",
+        "choices": [],
+    }
+
+    request = httpx.Request(
+        "POST",
+        "http://trusted-inference:11434/v1/chat/completions",
+    )
+
+    response = httpx.Response(
+        status_code=200,
+        json=expected_response,
+        request=request,
+    )
+
+    request_mock = AsyncMock(return_value=response)
+
+    with patch.object(
+        backend.client,
+        "post",
+        request_mock,
+    ):
+        payload = {
+            "model": "qwen2.5:7b",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Hello",
+                }
+            ],
+            "base_url": "http://169.254.169.254",
+            "provider_url": "http://attacker.example",
+            "endpoint": "http://attacker.example",
+        }
+
+        result = await backend.chat_completion(payload)
+
+    assert result == expected_response
+
+    request_mock.assert_awaited_once()
+
+    call = request_mock.call_args
+
+    assert call.args[0] == (
+        "http://trusted-inference:11434/v1/chat/completions"
+    )
+
+    assert call.args[0] != (
+        "http://169.254.169.254/chat/completions"
+    )
+
+    assert call.kwargs["json"] == payload
+
+    await backend.close()
