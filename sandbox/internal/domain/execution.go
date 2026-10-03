@@ -1,8 +1,16 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 type ExecutionID string
+
+func NewExecutionID() ExecutionID {
+	return ExecutionID(uuid.NewString())
+}
 
 type ExecutionState string
 
