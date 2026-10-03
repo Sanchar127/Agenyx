@@ -78,10 +78,10 @@ func (f *fakeSandboxStore) List(
 
 var _ SandboxStore = (*fakeSandboxStore)(nil)
 
-func TestSandboxStoreContract(t *testing.T) {
-	ctx := context.Background()
-	store := newFakeSandboxStore()
+func testSandboxStoreContract(t *testing.T, store SandboxStore) {
+	t.Helper()
 
+	ctx := context.Background()
 	sandbox := *NewSandbox(nil, validSandboxSpec())
 
 	// Create.
@@ -165,6 +165,10 @@ func TestSandboxStoreContract(t *testing.T) {
 			err,
 		)
 	}
+}
+
+func TestFakeSandboxStoreContract(t *testing.T) {
+	testSandboxStoreContract(t, newFakeSandboxStore())
 }
 
 func TestSandboxStoreMissingUpdate(t *testing.T) {
