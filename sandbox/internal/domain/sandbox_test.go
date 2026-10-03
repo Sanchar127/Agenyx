@@ -21,6 +21,14 @@ func TestNewSandbox(t *testing.T) {
 		t.Fatal("NewSandbox() returned nil")
 	}
 
+	if sandbox.State != SandboxStateRequested {
+		t.Fatalf(
+			"expected initial state %q, got %q",
+			SandboxStateRequested,
+			sandbox.State,
+		)
+	}
+
 	if sandbox.ID == "" {
 		t.Fatal("sandbox ID should not be empty")
 	}

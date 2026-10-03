@@ -14,6 +14,7 @@ func NewSandboxID() SandboxID {
 
 type Sandbox struct {
 	ID        SandboxID
+	State     SandboxState
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Metadata  map[string]string
@@ -24,6 +25,7 @@ func NewSandbox(metadata map[string]string) *Sandbox {
 
 	return &Sandbox{
 		ID:        NewSandboxID(),
+		State:     SandboxStateRequested,
 		CreatedAt: now,
 		UpdatedAt: now,
 		Metadata:  metadata,
