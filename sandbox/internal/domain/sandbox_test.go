@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -13,8 +14,10 @@ func TestNewSandbox(t *testing.T) {
 		"purpose":  "code-execution",
 	}
 
+	expectedSpec := validSandboxSpec()
+
 	before := time.Now().UTC()
-	sandbox := NewSandbox(metadata)
+	sandbox := NewSandbox(metadata, expectedSpec)
 	after := time.Now().UTC()
 
 	if sandbox == nil {
@@ -57,6 +60,14 @@ func TestNewSandbox(t *testing.T) {
 		)
 	}
 
+	if !reflect.DeepEqual(sandbox.Spec, expectedSpec) {
+		t.Fatalf(
+			"sandbox spec was not preserved: got %+v, want %+v",
+			sandbox.Spec,
+			expectedSpec,
+		)
+	}
+
 	for key, expected := range metadata {
 		if actual := sandbox.Metadata[key]; actual != expected {
 			t.Fatalf(
@@ -70,8 +81,8 @@ func TestNewSandbox(t *testing.T) {
 }
 
 func TestNewSandboxGeneratesUniqueIDs(t *testing.T) {
-	first := NewSandbox(nil)
-	second := NewSandbox(nil)
+	first := NewSandbox(nil, validSandboxSpec())
+	second := NewSandbox(nil, validSandboxSpec())
 
 	if first.ID == second.ID {
 		t.Fatal("two sandboxes should not have the same ID")
@@ -79,7 +90,7 @@ func TestNewSandboxGeneratesUniqueIDs(t *testing.T) {
 }
 
 func TestNewSandboxWithNilMetadata(t *testing.T) {
-	sandbox := NewSandbox(nil)
+	sandbox := NewSandbox(nil, validSandboxSpec())
 
 	if sandbox == nil {
 		t.Fatal("NewSandbox() returned nil")
