@@ -2,68 +2,121 @@ package domain
 
 import "testing"
 
-func TestSandboxStateIsTerminal(t *testing.T) {
+func TestSandboxStateCanTransitionTo(t *testing.T) {
 	tests := []struct {
-		name  string
-		state SandboxState
-		want  bool
+		name string
+		from SandboxState
+		to   SandboxState
+		want bool
 	}{
 		{
-			name:  "completed is terminal",
-			state: SandboxStateCompleted,
-			want:  true,
+			name: "requested to creating",
+			from: SandboxStateRequested,
+			to:   SandboxStateCreating,
+			want: true,
 		},
 		{
-			name:  "failed is terminal",
-			state: SandboxStateFailed,
-			want:  true,
+			name: "creating to ready",
+			from: SandboxStateCreating,
+			to:   SandboxStateReady,
+			want: true,
 		},
 		{
-			name:  "deleted is terminal",
-			state: SandboxStateDeleted,
-			want:  true,
+			name: "creating to failed",
+			from: SandboxStateCreating,
+			to:   SandboxStateFailed,
+			want: true,
 		},
 		{
-			name:  "requested is not terminal",
-			state: SandboxStateRequested,
-			want:  false,
+			name: "ready to stopping",
+			from: SandboxStateReady,
+			to:   SandboxStateStopping,
+			want: true,
 		},
 		{
-			name:  "creating is not terminal",
-			state: SandboxStateCreating,
-			want:  false,
+			name: "stopping to stopped",
+			from: SandboxStateStopping,
+			to:   SandboxStateStopped,
+			want: true,
 		},
 		{
-			name:  "ready is not terminal",
-			state: SandboxStateReady,
-			want:  false,
+			name: "stopped to deleted",
+			from: SandboxStateStopped,
+			to:   SandboxStateDeleted,
+			want: true,
 		},
 		{
-			name:  "executing is not terminal",
-			state: SandboxStateExecuting,
-			want:  false,
+			name: "requested cannot skip creating",
+			from: SandboxStateRequested,
+			to:   SandboxStateReady,
+			want: false,
 		},
 		{
-			name:  "stopping is not terminal",
-			state: SandboxStateStopping,
-			want:  false,
+			name: "ready cannot become failed directly",
+			from: SandboxStateReady,
+			to:   SandboxStateFailed,
+			want: false,
 		},
 		{
-			name:  "stopped is not terminal",
-			state: SandboxStateStopped,
-			want:  false,
+			name: "ready cannot become deleted directly",
+			from: SandboxStateReady,
+			to:   SandboxStateDeleted,
+			want: false,
+		},
+		{
+			name: "stopped cannot go back to ready",
+			from: SandboxStateStopped,
+			to:   SandboxStateReady,
+			want: false,
+		},
+		{
+			name: "failed cannot transition",
+			from: SandboxStateFailed,
+			to:   SandboxStateReady,
+			want: false,
+		},
+		{
+			name: "deleted cannot transition",
+			from: SandboxStateDeleted,
+			to:   SandboxStateReady,
+			want: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.state.IsTerminal(); got != tt.want {
+			got := tt.from.CanTransitionTo(tt.to)
+
+			if got != tt.want {
 				t.Fatalf(
-					"IsTerminal() = %v, want %v",
+					"CanTransitionTo(%q) = %v, want %v",
+					tt.to,
 					got,
 					tt.want,
 				)
 			}
 		})
 	}
+}
+
+func TestSandboxStateValidateTransitionTo(t *testing.T) {
+	t.Run("valid transition", func(t *testing.T) {
+		err := SandboxStateRequested.ValidateTransitionTo(
+			SandboxStateCreating,
+		)
+
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+	})
+
+	t.Run("invalid transition", func(t *testing.T) {
+		err := SandboxStateRequested.ValidateTransitionTo(
+			SandboxStateReady,
+		)
+
+		if err == nil {
+			t.Fatal("expected error for invalid transition")
+		}
+	})
 }
