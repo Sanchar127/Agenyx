@@ -17,12 +17,13 @@ func (p NetworkPolicy) Validate() error {
 
 	for _, rule := range p.EgressRules {
 		if rule.Host == "" {
-			return fmt.Errorf("network rule host cannot be empty")
+			return fmt.Errorf("%w: network rule host cannot be empty", ErrInvalidInput)
 		}
 
 		if rule.Port == 0 {
 			return fmt.Errorf(
-				"network rule port cannot be 0 for host %q",
+				"%w: network rule port cannot be 0 for host %q",
+				ErrInvalidInput,
 				rule.Host,
 			)
 		}
@@ -31,7 +32,8 @@ func (p NetworkPolicy) Validate() error {
 
 		if _, exists := seen[key]; exists {
 			return fmt.Errorf(
-				"duplicate network rule: %s",
+				"%w: duplicate network rule: %s",
+				ErrInvalidInput,
 				key,
 			)
 		}

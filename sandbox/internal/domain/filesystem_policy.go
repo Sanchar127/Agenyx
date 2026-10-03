@@ -27,12 +27,13 @@ func (p FilesystemPolicy) Validate() error {
 
 	for _, mount := range p.Mounts {
 		if mount.Path == "" {
-			return fmt.Errorf("filesystem path cannot be empty")
+			return fmt.Errorf("%w: filesystem path cannot be empty", ErrInvalidInput)
 		}
 
 		if !filepath.IsAbs(mount.Path) {
 			return fmt.Errorf(
-				"filesystem path must be absolute: %q",
+				"%w: filesystem path must be absolute: %q",
+				ErrInvalidInput,
 				mount.Path,
 			)
 		}
@@ -43,7 +44,8 @@ func (p FilesystemPolicy) Validate() error {
 			FilesystemAccessNone:
 		default:
 			return fmt.Errorf(
-				"invalid filesystem access %q for path %q",
+				"%w: invalid filesystem access %q for path %q",
+				ErrInvalidInput,
 				mount.Access,
 				mount.Path,
 			)
@@ -51,7 +53,8 @@ func (p FilesystemPolicy) Validate() error {
 
 		if _, exists := seen[mount.Path]; exists {
 			return fmt.Errorf(
-				"duplicate filesystem path: %q",
+				"%w: duplicate filesystem path: %q",
+				ErrInvalidInput,
 				mount.Path,
 			)
 		}

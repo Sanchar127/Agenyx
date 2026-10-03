@@ -34,7 +34,8 @@ func (s ExecutionState) ValidateTransitionTo(target ExecutionState) error {
 	}
 
 	return fmt.Errorf(
-		"invalid execution state transition: %s -> %s",
+		"%w: invalid execution state transition: %s -> %s",
+		ErrConflict,
 		s,
 		target,
 	)

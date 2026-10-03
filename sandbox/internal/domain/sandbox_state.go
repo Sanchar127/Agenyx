@@ -60,7 +60,8 @@ func (s SandboxState) ValidateTransitionTo(target SandboxState) error {
 	}
 
 	return fmt.Errorf(
-		"invalid sandbox state transition: %s -> %s",
+		"%w: invalid sandbox state transition: %s -> %s",
+		ErrConflict,
 		s,
 		target,
 	)
