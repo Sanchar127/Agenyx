@@ -1,31 +1,31 @@
 package domain
 
-import "time"
+import (
+	"time"
 
-type SandboxState string
-
-const (
-	SandboxRequested SandboxState = "REQUESTED"
-	SandboxCreating  SandboxState = "CREATING"
-	SandboxReady     SandboxState = "READY"
-	SandboxExecuting SandboxState = "EXECUTING"
-	SandboxStopping  SandboxState = "STOPPING"
-	SandboxStopped   SandboxState = "STOPPED"
-	SandboxFailed    SandboxState = "FAILED"
-	SandboxExpired   SandboxState = "EXPIRED"
-	SandboxDeleted   SandboxState = "DELETED"
+	"github.com/google/uuid"
 )
 
-type Sandbox struct {
-	ID        string
-	State     SandboxState
-	CreatedAt time.Time
-	UpdatedAt time.Time
+type SandboxID string
+
+func NewSandboxID() SandboxID {
+	return SandboxID(uuid.NewString())
 }
 
-type SandboxSpec struct {
-	CPU    int64
-	Memory int64
-	Disk   int64
-	PIDs   int
+type Sandbox struct {
+	ID        SandboxID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Metadata  map[string]string
+}
+
+func NewSandbox(metadata map[string]string) *Sandbox {
+	now := time.Now().UTC()
+
+	return &Sandbox{
+		ID:        NewSandboxID(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		Metadata:  metadata,
+	}
 }
