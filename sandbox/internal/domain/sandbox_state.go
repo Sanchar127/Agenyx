@@ -1,5 +1,7 @@
 package domain
 
+import "fmt"
+
 type SandboxState string
 
 const (
@@ -21,4 +23,45 @@ func (s SandboxState) IsTerminal() bool {
 	default:
 		return false
 	}
+}
+
+func (s SandboxState) CanTransitionTo(target SandboxState) bool {
+	switch s {
+	case SandboxStateRequested:
+		return target == SandboxStateCreating
+
+	case SandboxStateCreating:
+		return target == SandboxStateReady ||
+			target == SandboxStateFailed
+
+	case SandboxStateReady:
+		return target == SandboxStateExecuting ||
+			target == SandboxStateStopping
+
+	case SandboxStateExecuting:
+		return target == SandboxStateReady ||
+			target == SandboxStateCompleted ||
+			target == SandboxStateFailed
+
+	case SandboxStateStopping:
+		return target == SandboxStateStopped
+
+	case SandboxStateStopped:
+		return target == SandboxStateDeleted
+
+	default:
+		return false
+	}
+}
+
+func (s SandboxState) ValidateTransitionTo(target SandboxState) error {
+	if s.CanTransitionTo(target) {
+		return nil
+	}
+
+	return fmt.Errorf(
+		"invalid sandbox state transition: %s -> %s",
+		s,
+		target,
+	)
 }
