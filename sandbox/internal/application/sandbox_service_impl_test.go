@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -514,6 +515,68 @@ func TestSandboxServiceDeleteGetError(t *testing.T) {
 		t.Fatalf(
 			"Delete() Update calls = %d, want 0",
 			store.updateCalls,
+		)
+	}
+}
+
+func TestSandboxServiceCreateWorkflow(t *testing.T) {
+	store := &mockSandboxStore{}
+	service := NewSandboxService(store)
+
+	spec := validSpec()
+	metadata := map[string]string{
+		"owner": "test",
+	}
+
+	sandbox, err := service.Create(
+		context.Background(),
+		spec,
+		metadata,
+	)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	if sandbox.ID == "" {
+		t.Fatal("Create() returned sandbox with empty ID")
+	}
+
+	if sandbox.State != domain.SandboxStateRequested {
+		t.Fatalf(
+			"Create() state = %q, want %q",
+			sandbox.State,
+			domain.SandboxStateRequested,
+		)
+	}
+
+	if !reflect.DeepEqual(sandbox.Spec, spec) {
+		t.Fatal("Create() did not preserve spec")
+	}
+
+	if sandbox.Metadata["owner"] != "test" {
+		t.Fatal("Create() did not preserve metadata")
+	}
+
+	if store.createCalls != 1 {
+		t.Fatalf(
+			"store Create() calls = %d, want 1",
+			store.createCalls,
+		)
+	}
+
+	stored, err := store.Get(
+		context.Background(),
+		sandbox.ID,
+	)
+	if err != nil {
+		t.Fatalf("store.Get() error = %v", err)
+	}
+
+	if stored.State != domain.SandboxStateRequested {
+		t.Fatalf(
+			"stored sandbox state = %q, want %q",
+			stored.State,
+			domain.SandboxStateRequested,
 		)
 	}
 }
