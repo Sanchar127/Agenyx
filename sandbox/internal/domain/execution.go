@@ -49,3 +49,26 @@ func NewExecution(
 		UpdatedAt: now,
 	}
 }
+
+func (e *Execution) TransitionTo(target ExecutionState) error {
+	if err := e.State.ValidateTransitionTo(target); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+
+	e.State = target
+	e.UpdatedAt = now
+
+	switch target {
+	case ExecutionStateRunning:
+		e.StartedAt = &now
+
+	case ExecutionStateCompleted,
+		ExecutionStateFailed,
+		ExecutionStateTimeout:
+		e.CompletedAt = &now
+	}
+
+	return nil
+}
