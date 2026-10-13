@@ -73,8 +73,36 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+	})
+
+	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
+
+	mux.HandleFunc("/health/upstream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			return
+		}
+
+		r.URL.Path = "/health"
+		r.URL.RawPath = ""
+		proxy.ServeHTTP(w, r)
+	})
+
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/health"
+		r.URL.RawPath = ""
 		proxy.ServeHTTP(w, r)
 	})
 
