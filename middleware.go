@@ -49,9 +49,26 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+const maxRequestBodyBytes int64 = 1 << 20 // 1 MiB
+
 func requestSizeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if r.Body == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Limit how much data can be read from the request body.
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+
+		// Reject requests that declare a body larger than the limit.
+		if r.ContentLength > maxRequestBodyBytes {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+				"error": "request body too large",
+			})
+			return
+		}
+
 		next.ServeHTTP(w, r)
 	})
 }
