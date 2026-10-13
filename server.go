@@ -96,7 +96,7 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
-	mux.HandleFunc("/health/upstream", func(w http.ResponseWriter, r *http.Request) {
+	orchestratorHealthHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 			return
@@ -105,7 +105,13 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		r.URL.Path = "/health"
 		r.URL.RawPath = ""
 		proxy.ServeHTTP(w, r)
-	})
+	}
+
+	// Gateway health and orchestrator health are separate checks.
+	mux.HandleFunc("/health/orchestrator", orchestratorHealthHandler)
+
+	// Keep the previous endpoint for backward compatibility.
+	mux.HandleFunc("/health/upstream", orchestratorHealthHandler)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = "/health"
