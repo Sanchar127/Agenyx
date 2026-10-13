@@ -23,6 +23,11 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		return nil, errors.New("AGENEYX_API_KEY must be set to a non-empty secret")
 	}
 
+	permissions, err := parseAPIPermissions(os.Getenv("AGENEYX_API_KEY_PERMISSIONS"))
+	if err != nil {
+		return nil, err
+	}
+
 	upstream := os.Getenv("ORCHESTRATOR_URL")
 	if upstream == "" {
 		upstream = "http://orchestrator:8001"
@@ -144,6 +149,7 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		accessLogMiddleware(logger),
 		limiter.Middleware,
 		apiKeyAuthMiddleware(apiKey),
+		authorizationMiddleware(permissions),
 	)
 
 	return &GatewayServer{handler: handler}, nil

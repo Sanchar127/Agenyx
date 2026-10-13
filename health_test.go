@@ -13,6 +13,7 @@ func TestGatewayHealthEndpoints(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_URL", "http://127.0.0.1:1")
 
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
+	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
 	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)

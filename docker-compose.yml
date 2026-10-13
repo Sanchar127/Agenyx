@@ -259,6 +259,7 @@ services:
 
     environment:
       ORCHESTRATOR_URL: http://orchestrator:8001
+      AGENEYX_API_KEY_PERMISSIONS: agents:run,tasks:read
 
     user: "1000:1000"
 

@@ -73,7 +73,7 @@ func TestRateLimiterAllowsRequestsWithinLimit(t *testing.T) {
 		},
 	))
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/tasks", nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent/runs/test-execution", nil)
 
 	first := httptest.NewRecorder()
 	handler.ServeHTTP(first, req)
@@ -99,8 +99,8 @@ func TestRateLimiterAllowsRequestsWithinLimit(t *testing.T) {
 func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/tasks" {
-				t.Errorf("upstream path = %q, want /v1/tasks", r.URL.Path)
+			if r.URL.Path != "/v1/agent/runs/test-execution" {
+				t.Errorf("upstream path = %q, want /v1/agent/runs/test-execution", r.URL.Path)
 			}
 
 			if r.URL.RawQuery != "limit=5" {
@@ -122,6 +122,7 @@ func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
+	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
 	gateway, err := NewGatewayServer(logger)
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
@@ -130,7 +131,7 @@ func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/v1/tasks?limit=5",
+		"/v1/agent/runs/test-execution?limit=5",
 		nil,
 	)
 	req.Header.Set("Authorization", "Bearer test-api-key")
@@ -160,6 +161,7 @@ func TestGatewayReturns404ForUnknownRoute(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_URL", "http://127.0.0.1:1")
 
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
+	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
 	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
@@ -239,6 +241,7 @@ func TestGatewayStreamsUpstreamChunks(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
 
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
+	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
 	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
@@ -248,7 +251,7 @@ func TestGatewayStreamsUpstreamChunks(t *testing.T) {
 	defer gatewayServer.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	streamReq, err := http.NewRequest(http.MethodGet, gatewayServer.URL+"/v1/stream", nil)
+	streamReq, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/v1/agent/stream", nil)
 	if err != nil {
 		t.Fatalf("create stream request: %v", err)
 	}
@@ -384,6 +387,7 @@ func TestRateLimiterConcurrentAccess(t *testing.T) {
 func TestGatewayAPIKeyAuthentication(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_URL", "")
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
+	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -410,7 +414,7 @@ func TestGatewayAPIKeyAuthentication(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			req := httptest.NewRequest(http.MethodGet, "/v1/agent/runs/test-execution", nil)
 			if tt.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tt.token)
 			}
@@ -439,6 +443,7 @@ func TestGatewayAPIKeyAuthentication(t *testing.T) {
 // to initialize when no API key is configured.
 func TestGatewayRequiresAPIKeyConfiguration(t *testing.T) {
 	t.Setenv("AGENEYX_API_KEY", "")
+	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
 
 	_, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err == nil {
