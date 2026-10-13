@@ -47,3 +47,25 @@ func TestGatewayHealthEndpoints(t *testing.T) {
 		})
 	}
 }
+
+func TestResponseRecorderSupportsFlushing(t *testing.T) {
+	underlying := httptest.NewRecorder()
+	recorder := &responseRecorder{ResponseWriter: underlying}
+
+	if _, ok := any(recorder).(http.Flusher); !ok {
+		t.Fatal("responseRecorder does not implement http.Flusher")
+	}
+
+	if _, err := recorder.Write([]byte("token")); err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	recorder.Flush()
+
+	if !underlying.Flushed {
+		t.Fatal("Flush did not reach the underlying ResponseWriter")
+	}
+
+	if recorder.Unwrap() != underlying {
+		t.Fatal("Unwrap did not return the original ResponseWriter")
+	}
+}

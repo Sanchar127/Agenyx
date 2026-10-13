@@ -71,6 +71,21 @@ func (w *responseRecorder) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+// Unwrap exposes the original writer to http.ResponseController.
+func (w *responseRecorder) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// Flush forwards flushes so streaming responses can reach the client.
+func (w *responseRecorder) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (w *responseRecorder) Write(data []byte) (int, error) {
 	if w.status == 0 {
 		w.WriteHeader(http.StatusOK)

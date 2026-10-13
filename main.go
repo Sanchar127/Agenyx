@@ -24,8 +24,9 @@ func main() {
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      130 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// Streaming responses may outlast a fixed write deadline.
+		WriteTimeout: 0,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	httpServer := &http.Server{

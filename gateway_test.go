@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRequestIDMiddleware(t *testing.T) {
@@ -187,5 +190,82 @@ func TestWriteJSON(t *testing.T) {
 
 	if body["error"] != "invalid request" {
 		t.Errorf("unexpected response body: %v", body)
+	}
+}
+
+func TestGatewayStreamsUpstreamChunks(t *testing.T) {
+	release := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("upstream ResponseWriter does not support flushing")
+			return
+		}
+
+		if _, err := io.WriteString(w, "data: first\n\n"); err != nil {
+			t.Errorf("write first chunk: %v", err)
+			return
+		}
+		flusher.Flush()
+
+		// Keep the upstream response open until the test receives the first chunk.
+		<-release
+
+		if _, err := io.WriteString(w, "data: second\n\n"); err != nil {
+			t.Errorf("write second chunk: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
+
+	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+
+	gatewayServer := httptest.NewServer(gateway.Handler())
+	defer gatewayServer.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(gatewayServer.URL + "/v1/stream")
+	if err != nil {
+		t.Fatalf("request gateway: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	firstLine, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read first streamed chunk before upstream finished: %v", err)
+	}
+	if firstLine != "data: first\n" {
+		t.Fatalf("first streamed line = %q, want %q", firstLine, "data: first\n")
+	}
+
+	close(release)
+
+	remaining, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining stream: %v", err)
+	}
+	if !strings.Contains(string(remaining), "data: second\n\n") {
+		t.Fatalf("second chunk missing from stream: %q", remaining)
 	}
 }
