@@ -580,3 +580,71 @@ func TestSandboxServiceCreateWorkflow(t *testing.T) {
 		)
 	}
 }
+
+func TestSandboxServiceStopPersistsStoppingState(t *testing.T) {
+	sandbox := validSandbox()
+	sandbox.State = domain.SandboxStateReady
+
+	store := &mockSandboxStore{
+		sandbox: sandbox,
+	}
+
+	service := NewSandboxService(store)
+
+	err := service.Stop(
+		context.Background(),
+		sandbox.ID,
+	)
+	if err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+
+	if store.sandbox.State != domain.SandboxStateStopping {
+		t.Fatalf(
+			"stored state = %q, want %q",
+			store.sandbox.State,
+			domain.SandboxStateStopping,
+		)
+	}
+
+	if store.updateCalls != 1 {
+		t.Fatalf(
+			"store Update() calls = %d, want 1",
+			store.updateCalls,
+		)
+	}
+}
+
+func TestSandboxServiceDeletePersistsDeletedState(t *testing.T) {
+	sandbox := validSandbox()
+	sandbox.State = domain.SandboxStateStopped
+
+	store := &mockSandboxStore{
+		sandbox: sandbox,
+	}
+
+	service := NewSandboxService(store)
+
+	err := service.Delete(
+		context.Background(),
+		sandbox.ID,
+	)
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+
+	if store.sandbox.State != domain.SandboxStateDeleted {
+		t.Fatalf(
+			"stored state = %q, want %q",
+			store.sandbox.State,
+			domain.SandboxStateDeleted,
+		)
+	}
+
+	if store.updateCalls != 1 {
+		t.Fatalf(
+			"store Update() calls = %d, want 1",
+			store.updateCalls,
+		)
+	}
+}
