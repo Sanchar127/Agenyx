@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -61,7 +62,10 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 }
 
 func TestRateLimiterAllowsRequestsWithinLimit(t *testing.T) {
-	limiter := NewRateLimiter(1, 1)
+	limiter, err := NewRateLimiter(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	handler := limiter.Middleware(http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -267,5 +271,100 @@ func TestGatewayStreamsUpstreamChunks(t *testing.T) {
 	}
 	if !strings.Contains(string(remaining), "data: second\n\n") {
 		t.Fatalf("second chunk missing from stream: %q", remaining)
+	}
+}
+
+func TestNewRateLimiterRejectsInvalidConfiguration(t *testing.T) {
+	tests := []struct {
+		name  string
+		rate  int
+		burst int
+	}{
+		{name: "zero rate", rate: 0, burst: 10},
+		{name: "negative rate", rate: -1, burst: 10},
+		{name: "zero burst", rate: 10, burst: 0},
+		{name: "negative burst", rate: 10, burst: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			limiter, err := NewRateLimiter(tt.rate, tt.burst)
+			if err == nil {
+				t.Fatal("expected an error for invalid configuration")
+			}
+			if limiter != nil {
+				t.Fatal("expected nil limiter for invalid configuration")
+			}
+		})
+	}
+}
+
+func TestRateLimiterRemovesExpiredBuckets(t *testing.T) {
+	limiter, err := NewRateLimiter(10, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	limiter.maxBuckets = 1
+	limiter.buckets["inactive-client"] = &bucket{
+		tokens:     10,
+		lastUpdate: time.Now().Add(-11 * time.Minute),
+	}
+
+	if !limiter.allow("new-client") {
+		t.Fatal("expected new client to be allowed after expired bucket cleanup")
+	}
+
+	if _, exists := limiter.buckets["inactive-client"]; exists {
+		t.Fatal("expected expired bucket to be removed")
+	}
+	if _, exists := limiter.buckets["new-client"]; !exists {
+		t.Fatal("expected new client's bucket to exist")
+	}
+}
+
+func TestRateLimiterRejectsNewClientsWhenFull(t *testing.T) {
+	limiter, err := NewRateLimiter(10, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	limiter.maxBuckets = 1
+
+	if !limiter.allow("client-a") {
+		t.Fatal("expected first client to be allowed")
+	}
+	if limiter.allow("client-b") {
+		t.Fatal("expected new client to be rejected when bucket map is full")
+	}
+	if _, exists := limiter.buckets["client-a"]; !exists {
+		t.Fatal("expected existing client's bucket to remain")
+	}
+	if !limiter.allow("client-a") {
+		t.Fatal("expected existing client to continue using its bucket")
+	}
+}
+
+func TestRateLimiterConcurrentAccess(t *testing.T) {
+	limiter, err := NewRateLimiter(1000, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const requests = 100
+	var wg sync.WaitGroup
+	wg.Add(requests)
+
+	for i := 0; i < requests; i++ {
+		go func() {
+			defer wg.Done()
+			limiter.allow("same-client")
+		}()
+	}
+
+	wg.Wait()
+
+	if got := len(limiter.buckets); got != 1 {
+		t.Fatalf("expected one bucket, got %d", got)
 	}
 }

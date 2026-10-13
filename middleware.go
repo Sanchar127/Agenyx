@@ -3,9 +3,9 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -148,18 +148,43 @@ type bucket struct {
 	lastUpdate time.Time
 }
 
+const (
+	defaultBucketIdleTTL = 10 * time.Minute
+	defaultMaxBuckets    = 10_000
+)
+
 type RateLimiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	rate     float64
-	capacity float64
+	mu         sync.Mutex
+	buckets    map[string]*bucket
+	rate       float64
+	capacity   float64
+	idleTTL    time.Duration
+	maxBuckets int
 }
 
-func NewRateLimiter(rate, burst int) *RateLimiter {
+func NewRateLimiter(rate, burst int) (*RateLimiter, error) {
+	if rate <= 0 {
+		return nil, errors.New("rate must be greater than zero")
+	}
+	if burst <= 0 {
+		return nil, errors.New("burst capacity must be greater than zero")
+	}
+
 	return &RateLimiter{
-		buckets:  make(map[string]*bucket),
-		rate:     float64(rate),
-		capacity: float64(burst),
+		buckets:    make(map[string]*bucket),
+		rate:       float64(rate),
+		capacity:   float64(burst),
+		idleTTL:    defaultBucketIdleTTL,
+		maxBuckets: defaultMaxBuckets,
+	}, nil
+}
+
+// removeExpiredBuckets removes inactive buckets. The caller must hold l.mu.
+func (l *RateLimiter) removeExpiredBuckets(now time.Time) {
+	for ip, b := range l.buckets {
+		if now.Sub(b.lastUpdate) >= l.idleTTL {
+			delete(l.buckets, ip)
+		}
 	}
 }
 
@@ -168,9 +193,18 @@ func (l *RateLimiter) allow(ip string) bool {
 	defer l.mu.Unlock()
 
 	now := time.Now()
+	b, exists := l.buckets[ip]
 
-	b, ok := l.buckets[ip]
-	if !ok {
+	if !exists {
+		if len(l.buckets) >= l.maxBuckets {
+			l.removeExpiredBuckets(now)
+		}
+
+		// Never evict active clients to make room for a new client.
+		if len(l.buckets) >= l.maxBuckets {
+			return false
+		}
+
 		b = &bucket{
 			tokens:     l.capacity,
 			lastUpdate: now,
@@ -179,12 +213,14 @@ func (l *RateLimiter) allow(ip string) bool {
 	}
 
 	elapsed := now.Sub(b.lastUpdate).Seconds()
-	b.tokens += elapsed * l.rate
+	if elapsed < 0 {
+		elapsed = 0
+	}
 
+	b.tokens += elapsed * l.rate
 	if b.tokens > l.capacity {
 		b.tokens = l.capacity
 	}
-
 	b.lastUpdate = now
 
 	if b.tokens < 1 {
@@ -203,7 +239,7 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 
 		if !l.allow(clientIP(r)) {
-			w.Header().Set("Retry-After", strconv.Itoa(1))
+			w.Header().Set("Retry-After", "1")
 			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 			return
 		}

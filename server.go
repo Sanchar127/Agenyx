@@ -119,7 +119,10 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		http.NotFound(w, r)
 	})
 
-	limiter := NewRateLimiter(10, 20)
+	limiter, err := NewRateLimiter(10, 20)
+	if err != nil {
+		return nil, err
+	}
 
 	handler := chain(
 		mux,
