@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -26,6 +27,15 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 	permissions, err := parseAPIPermissions(os.Getenv("AGENEYX_API_KEY_PERMISSIONS"))
 	if err != nil {
 		return nil, err
+	}
+
+	trustedProxies, err := parseTrustedProxies(os.Getenv("AGENEYX_TRUSTED_PROXIES"))
+	if err != nil {
+		return nil, err
+	}
+
+	resolveClientIP := func(r *http.Request) string {
+		return resolvedClientIP(r, trustedProxies)
 	}
 
 	upstream := os.Getenv("ORCHESTRATOR_URL")
@@ -54,11 +64,9 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 
 		r.Header.Set("X-Forwarded-Proto", "https")
 
-		if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
-			r.Header.Set("X-Forwarded-For", forwardedFor+", "+clientIP(r))
-		} else {
-			r.Header.Set("X-Forwarded-For", clientIP(r))
-		}
+		// Do not forward an arbitrary client-supplied forwarding chain.
+		// Forward only the client address resolved using trusted proxies.
+		r.Header.Set("X-Forwarded-For", resolveClientIP(r))
 	}
 
 	proxy.Transport = &http.Transport{
@@ -147,7 +155,7 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		securityHeadersMiddleware,
 		requestSizeMiddleware,
 		accessLogMiddleware(logger),
-		limiter.Middleware,
+		limiter.MiddlewareWithClientIP(resolveClientIP),
 		apiKeyAuthMiddleware(apiKey),
 		authorizationMiddleware(permissions),
 	)
@@ -160,10 +168,13 @@ func (s *GatewayServer) Handler() http.Handler {
 }
 
 func clientIP(r *http.Request) string {
-	host := r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
 
-	if i := strings.LastIndex(host, ":"); i >= 0 {
-		host = strings.Trim(host[:i], "[]")
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.Unmap().String()
 	}
 
 	return host

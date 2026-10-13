@@ -233,22 +233,35 @@ func (l *RateLimiter) allow(ip string) bool {
 }
 
 func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+	return l.MiddlewareWithClientIP(clientIP)(next)
+}
+
+// MiddlewareWithClientIP allows the gateway to use a trusted-proxy-aware
+// client IP resolver while keeping Middleware's default behavior unchanged.
+func (l *RateLimiter) MiddlewareWithClientIP(resolve func(*http.Request) string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasPrefix(r.URL.Path, "/v1/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			ip := clientIP(r)
+			if resolve != nil {
+				ip = resolve(r)
+			}
+
+			if !l.allow(ip) {
+				w.Header().Set("Retry-After", "1")
+				writeJSON(w, http.StatusTooManyRequests, map[string]string{
+					"error": "rate limit exceeded",
+				})
+				return
+			}
+
 			next.ServeHTTP(w, r)
-			return
-		}
-
-		if !l.allow(clientIP(r)) {
-			w.Header().Set("Retry-After", "1")
-			writeJSON(w, http.StatusTooManyRequests, map[string]string{
-				"error": "rate limit exceeded",
-			})
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+		})
+	}
 }
 
 // apiKeyAuthMiddleware protects the public API routes with a shared API key.
