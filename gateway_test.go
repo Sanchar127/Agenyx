@@ -121,6 +121,7 @@ func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
 
 	logger := log.New(io.Discard, "", 0)
+	t.Setenv("AGENEYX_API_KEY", "test-api-key")
 	gateway, err := NewGatewayServer(logger)
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
@@ -132,6 +133,7 @@ func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 		"/v1/tasks?limit=5",
 		nil,
 	)
+	req.Header.Set("Authorization", "Bearer test-api-key")
 
 	gateway.Handler().ServeHTTP(rec, req)
 
@@ -157,6 +159,7 @@ func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 func TestGatewayReturns404ForUnknownRoute(t *testing.T) {
 	t.Setenv("ORCHESTRATOR_URL", "http://127.0.0.1:1")
 
+	t.Setenv("AGENEYX_API_KEY", "test-api-key")
 	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
@@ -235,6 +238,7 @@ func TestGatewayStreamsUpstreamChunks(t *testing.T) {
 
 	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
 
+	t.Setenv("AGENEYX_API_KEY", "test-api-key")
 	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
@@ -244,7 +248,13 @@ func TestGatewayStreamsUpstreamChunks(t *testing.T) {
 	defer gatewayServer.Close()
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(gatewayServer.URL + "/v1/stream")
+	streamReq, err := http.NewRequest(http.MethodGet, gatewayServer.URL+"/v1/stream", nil)
+	if err != nil {
+		t.Fatalf("create stream request: %v", err)
+	}
+	streamReq.Header.Set("Authorization", "Bearer test-api-key")
+
+	resp, err := client.Do(streamReq)
 	if err != nil {
 		t.Fatalf("request gateway: %v", err)
 	}
@@ -366,5 +376,72 @@ func TestRateLimiterConcurrentAccess(t *testing.T) {
 
 	if got := len(limiter.buckets); got != 1 {
 		t.Fatalf("expected one bucket, got %d", got)
+	}
+}
+
+// TestGatewayAPIKeyAuthentication verifies that /v1/ routes require a valid
+// bearer token while allowing a correctly authenticated request.
+func TestGatewayAPIKeyAuthentication(t *testing.T) {
+	t.Setenv("ORCHESTRATOR_URL", "")
+	t.Setenv("AGENEYX_API_KEY", "test-api-key")
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
+
+	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		token      string
+		wantStatus int
+	}{
+		{name: "missing token", wantStatus: http.StatusUnauthorized},
+		{name: "invalid token", token: "wrong-key", wantStatus: http.StatusUnauthorized},
+		{name: "valid token", token: "test-api-key", wantStatus: http.StatusOK},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			if tt.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tt.token)
+			}
+
+			rec := httptest.NewRecorder()
+			gateway.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s",
+					rec.Code, tt.wantStatus, rec.Body.String())
+			}
+
+			if tt.wantStatus == http.StatusUnauthorized {
+				if got := rec.Header().Get("WWW-Authenticate"); got != "Bearer" {
+					t.Errorf("WWW-Authenticate = %q, want %q", got, "Bearer")
+				}
+				if got := rec.Header().Get("Content-Type"); got != "application/json" {
+					t.Errorf("Content-Type = %q, want application/json", got)
+				}
+			}
+		})
+	}
+}
+
+// TestGatewayRequiresAPIKeyConfiguration verifies that the gateway fails
+// to initialize when no API key is configured.
+func TestGatewayRequiresAPIKeyConfiguration(t *testing.T) {
+	t.Setenv("AGENEYX_API_KEY", "")
+
+	_, err := NewGatewayServer(log.New(io.Discard, "", 0))
+	if err == nil {
+		t.Fatal("expected an error when AGENEYX_API_KEY is empty")
 	}
 }

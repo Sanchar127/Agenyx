@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -17,6 +18,11 @@ type GatewayServer struct {
 }
 
 func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
+	apiKey := os.Getenv("AGENEYX_API_KEY")
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, errors.New("AGENEYX_API_KEY must be set to a non-empty secret")
+	}
+
 	upstream := os.Getenv("ORCHESTRATOR_URL")
 	if upstream == "" {
 		upstream = "http://orchestrator:8001"
@@ -137,6 +143,7 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		requestSizeMiddleware,
 		accessLogMiddleware(logger),
 		limiter.Middleware,
+		apiKeyAuthMiddleware(apiKey),
 	)
 
 	return &GatewayServer{handler: handler}, nil

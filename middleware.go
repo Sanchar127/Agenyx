@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"log"
@@ -248,4 +249,31 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// apiKeyAuthMiddleware protects the public API routes with a shared API key.
+// Health endpoints remain accessible without authentication.
+func apiKeyAuthMiddleware(expectedKey string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !strings.HasPrefix(r.URL.Path, "/v1/") {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			parts := strings.Fields(r.Header.Get("Authorization"))
+			if len(parts) != 2 ||
+				!strings.EqualFold(parts[0], "Bearer") ||
+				len(parts[1]) != len(expectedKey) ||
+				subtle.ConstantTimeCompare([]byte(parts[1]), []byte(expectedKey)) != 1 {
+				w.Header().Set("WWW-Authenticate", "Bearer")
+				writeJSON(w, http.StatusUnauthorized, map[string]string{
+					"error": "unauthorized",
+				})
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
