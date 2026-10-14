@@ -11,12 +11,24 @@ import (
 	"time"
 
 	"github.com/sanchar127/agenyx/internal/gateway"
+	"github.com/sanchar127/agenyx/internal/orchestrator"
 )
 
 func main() {
 	logger := log.New(os.Stdout, "", 0)
 
-	server, err := gateway.NewGatewayServer(logger)
+	queue, err := orchestrator.NewValkeyQueueFromEnv()
+	if err != nil {
+		logger.Fatalf("initialize Valkey queue: %v", err)
+	}
+	defer func() {
+		if err := queue.Close(); err != nil {
+			logger.Printf("close Valkey queue: %v", err)
+		}
+	}()
+
+	service := orchestrator.NewService(queue)
+	server, err := gateway.NewGatewayServerWithOrchestrator(logger, service)
 	if err != nil {
 		logger.Fatalf("initialize gateway: %v", err)
 	}

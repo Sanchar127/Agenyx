@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sanchar127/agenyx/internal/orchestrator"
 	"github.com/sanchar127/agenyx/recipe"
 )
 
@@ -21,7 +22,27 @@ type GatewayServer struct {
 	handler http.Handler
 }
 
+// NewGatewayServer creates the gateway with the legacy upstream proxy.
 func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
+	return newGatewayServer(logger, nil)
+}
+
+// NewGatewayServerWithOrchestrator creates the production gateway with direct
+// Go orchestrator routes. Other authorized API routes retain the upstream proxy.
+func NewGatewayServerWithOrchestrator(
+	logger *log.Logger,
+	service *orchestrator.Service,
+) (*GatewayServer, error) {
+	if service == nil {
+		return nil, errors.New("orchestrator service must not be nil")
+	}
+	return newGatewayServer(logger, service)
+}
+
+func newGatewayServer(
+	logger *log.Logger,
+	service *orchestrator.Service,
+) (*GatewayServer, error) {
 	recipePath := strings.TrimSpace(os.Getenv("AGENEYX_GATEWAY_RECIPE"))
 	if recipePath == "" {
 		candidates := []string{
@@ -166,6 +187,15 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		proxy.ServeHTTP(w, r)
 	})
 
+	// Migrate only the run and execution-status endpoints to Go.
+	// The existing authorization middleware still runs before these handlers.
+	if service != nil {
+		orchestratorHandler := orchestrator.HTTPHandler(service)
+		mux.Handle("POST /v1/agent/run", orchestratorHandler)
+		mux.Handle("GET /v1/agent/runs/{execution_id}", orchestratorHandler)
+	}
+
+	// Keep other authorized API routes on the existing upstream during migration.
 	mux.Handle("/v1/", proxy)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
