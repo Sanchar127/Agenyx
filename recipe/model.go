@@ -21,10 +21,10 @@ type Metadata struct {
 // Document is the common envelope shared by every Agenyx recipe kind.
 // Spec is decoded into a component-specific type by the consumer.
 type Document struct {
-	APIVersion string      `yaml:"apiVersion"`
-	Kind       string      `yaml:"kind"`
-	Metadata   Metadata    `yaml:"metadata"`
-	Spec       yaml.Node   `yaml:"spec"`
+	APIVersion string    `yaml:"apiVersion"`
+	Kind       string    `yaml:"kind"`
+	Metadata   Metadata  `yaml:"metadata"`
+	Spec       yaml.Node `yaml:"spec"`
 }
 
 func LoadFile(path string) (*Document, error) {
