@@ -1,0 +1,40 @@
+apiVersion: agenyx.ai/v1alpha1
+kind: MCPGatewayRecipe
+
+metadata:
+  name: default
+  version: "1.0.0"
+
+spec:
+  server:
+    name: agenyx-mcp-gateway
+    listenAddress: "0.0.0.0:8081"
+    transport: streamable-http
+    endpoint: /mcp
+
+  upstreams: []
+
+  discovery:
+    refreshInterval: 60s
+    cacheTools: true
+
+  security:
+    authentication:
+      enabled: true
+      mode: bearer
+      tokenEnv: AGENYX_MCP_GATEWAY_TOKEN
+
+    authorization:
+      defaultPolicy: deny
+
+  execution:
+    timeout: 30s
+    maxConcurrentCalls: 100
+
+  limits:
+    maxArgumentsBytes: 1048576
+    maxResultBytes: 4194304
+
+  observability:
+    metricsEnabled: true
+    tracingEnabled: true
