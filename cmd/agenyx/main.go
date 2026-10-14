@@ -12,6 +12,7 @@ import (
 
 	"github.com/sanchar127/agenyx/internal/gateway"
 	"github.com/sanchar127/agenyx/internal/orchestrator"
+	taskworker "github.com/sanchar127/agenyx/internal/worker"
 )
 
 func main() {
@@ -28,6 +29,19 @@ func main() {
 	}()
 
 	service := orchestrator.NewService(queue)
+
+	// The worker has its own Valkey client but shares the task stream
+	// and execution-state keys with the orchestrator.
+	taskWorker, err := taskworker.NewFromEnv(logger)
+	if err != nil {
+		logger.Fatalf("initialize task worker: %v", err)
+	}
+	defer func() {
+		if err := taskWorker.Close(); err != nil {
+			logger.Printf("close task worker: %v", err)
+		}
+	}()
+
 	server, err := gateway.NewGatewayServerWithOrchestrator(logger, service)
 	if err != nil {
 		logger.Fatalf("initialize gateway: %v", err)
@@ -56,6 +70,16 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
+
+	// Run the worker in this same process. A worker startup failure
+	// cancels the application context so the gateway shuts down too.
+	go func() {
+		logger.Println(`{"event":"task_worker_starting"}`)
+		if err := taskWorker.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Printf("task worker stopped unexpectedly: %v", err)
+			stop()
+		}
+	}()
 
 	errorsChannel := make(chan error, 2)
 
