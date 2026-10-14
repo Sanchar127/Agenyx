@@ -9,12 +9,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/sanchar127/agenyx/internal/gateway"
 )
 
 func main() {
 	logger := log.New(os.Stdout, "", 0)
 
-	server, err := NewGatewayServer(logger)
+	server, err := gateway.NewGatewayServer(logger)
 	if err != nil {
 		logger.Fatalf("initialize gateway: %v", err)
 	}

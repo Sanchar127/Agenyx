@@ -1,4 +1,4 @@
-package main
+package gateway
 
 import (
 	"encoding/json"
@@ -17,7 +17,6 @@ import (
 	"github.com/sanchar127/agenyx/recipe"
 )
 
-
 type GatewayServer struct {
 	handler http.Handler
 }
@@ -25,7 +24,23 @@ type GatewayServer struct {
 func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 	recipePath := strings.TrimSpace(os.Getenv("AGENEYX_GATEWAY_RECIPE"))
 	if recipePath == "" {
-		recipePath = "recipes/gateway/default.yaml"
+		candidates := []string{
+			"recipes/gateway/default.yaml",
+			"../../recipes/gateway/default.yaml",
+		}
+
+		for _, candidate := range candidates {
+			if _, err := os.Stat(candidate); err == nil {
+				recipePath = candidate
+				break
+			}
+		}
+
+		if recipePath == "" {
+			return nil, errors.New(
+				"gateway recipe not found; set AGENEYX_GATEWAY_RECIPE",
+			)
+		}
 	}
 
 	gatewaySpec, err := recipe.LoadGatewaySpec(recipePath)
@@ -158,9 +173,9 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 	})
 
 	limiter, err := NewRateLimiter(
-	gatewaySpec.RateLimit.RequestsPerSecond,
-	gatewaySpec.RateLimit.Burst,
-)
+		gatewaySpec.RateLimit.RequestsPerSecond,
+		gatewaySpec.RateLimit.Burst,
+	)
 
 	if err != nil {
 		return nil, err
