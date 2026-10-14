@@ -10,7 +10,7 @@ services:
     container_name: agenyx-agent
 
     env_file:
-      - ./agent/.env
+      - ./internal/agent/.env
 
     environment:
       AGENTYX_ROUTER_BASE_URL: http://router:8005
@@ -119,7 +119,7 @@ services:
     container_name: agenyx-inference
 
     volumes:
-    - ./inference:/app
+    - ./internal/inference:/app
 
     environment:
       INFERENCE_BACKEND_BASE_URL: http://ollama:11434/v1
@@ -161,7 +161,7 @@ services:
     container_name: agenyx-worker
 
     volumes:
-      - ./worker:/app
+      - ./internal/worker:/app
 
     environment:
       AGENTYX_VALKEY_URL: redis://valkey:6379/0
@@ -224,7 +224,7 @@ services:
 
   gateway:
     build:
-      context: .
+      context: ./internal/gateway
       dockerfile: Dockerfile
 
     container_name: agenyx-gateway
