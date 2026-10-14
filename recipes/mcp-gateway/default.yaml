@@ -12,6 +12,8 @@ spec:
     transport: streamable-http
     endpoint: /mcp
 
+  # MCP servers connected to this gateway.
+  # Add upstreams as their configurations become supported.
   upstreams: []
 
   discovery:
