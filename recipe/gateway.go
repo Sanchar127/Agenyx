@@ -46,3 +46,30 @@ func (s GatewaySpec) Validate() error {
 
 	return nil
 }
+
+// LoadGatewaySpec loads and validates a gateway recipe from a YAML file.
+func LoadGatewaySpec(path string) (GatewaySpec, error) {
+	doc, err := LoadFile(path)
+	if err != nil {
+		return GatewaySpec{}, err
+	}
+
+	if doc.Kind != GatewayRecipeKind {
+		return GatewaySpec{}, fmt.Errorf(
+			"unexpected recipe kind %q; expected %q",
+			doc.Kind,
+			GatewayRecipeKind,
+		)
+	}
+
+	var spec GatewaySpec
+	if err := doc.DecodeSpec(&spec); err != nil {
+		return GatewaySpec{}, err
+	}
+
+	if err := spec.Validate(); err != nil {
+		return GatewaySpec{}, fmt.Errorf("validate gateway recipe: %w", err)
+	}
+
+	return spec, nil
+}

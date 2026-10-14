@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -12,13 +13,25 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/sanchar127/agenyx/recipe"
 )
+
 
 type GatewayServer struct {
 	handler http.Handler
 }
 
 func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
+	recipePath := strings.TrimSpace(os.Getenv("AGENEYX_GATEWAY_RECIPE"))
+	if recipePath == "" {
+		recipePath = "recipes/gateway/default.yaml"
+	}
+
+	gatewaySpec, err := recipe.LoadGatewaySpec(recipePath)
+	if err != nil {
+		return nil, fmt.Errorf("load gateway recipe: %w", err)
+	}
 	apiKey := os.Getenv("AGENEYX_API_KEY")
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, errors.New("AGENEYX_API_KEY must be set to a non-empty secret")
@@ -144,7 +157,11 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		http.NotFound(w, r)
 	})
 
-	limiter, err := NewRateLimiter(10, 20)
+	limiter, err := NewRateLimiter(
+	gatewaySpec.RateLimit.RequestsPerSecond,
+	gatewaySpec.RateLimit.Burst,
+)
+
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +170,7 @@ func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 		mux,
 		requestIDMiddleware,
 		securityHeadersMiddleware,
-		requestSizeMiddleware,
+		requestSizeMiddlewareWithLimit(gatewaySpec.Request.MaxBodyBytes),
 		accessLogMiddleware(logger),
 		limiter.MiddlewareWithClientIP(resolveClientIP),
 		apiKeyAuthMiddleware(apiKey),

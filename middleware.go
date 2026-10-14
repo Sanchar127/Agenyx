@@ -52,26 +52,34 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 
 const maxRequestBodyBytes int64 = 1 << 20 // 1 MiB
 
+// requestSizeMiddleware preserves the default limit for existing callers
+// and tests.
 func requestSizeMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body == nil {
+	return requestSizeMiddlewareWithLimit(maxRequestBodyBytes)(next)
+}
+
+// requestSizeMiddlewareWithLimit creates middleware with a configured
+// maximum request-body size.
+func requestSizeMiddlewareWithLimit(maxBytes int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+
+			if r.ContentLength > maxBytes {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
+					"error": "request body too large",
+				})
+				return
+			}
+
 			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Limit how much data can be read from the request body.
-		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
-
-		// Reject requests that declare a body larger than the limit.
-		if r.ContentLength > maxRequestBodyBytes {
-			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{
-				"error": "request body too large",
-			})
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+		})
+	}
 }
 
 type responseRecorder struct {
