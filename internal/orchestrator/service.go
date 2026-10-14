@@ -72,3 +72,19 @@ func (s *Service) GetExecution(
 
 	return state, nil
 }
+
+// Ready checks whether the underlying task queue is available.
+func (s *Service) Ready(ctx context.Context) error {
+	pinger, ok := s.queue.(interface {
+		Ping(context.Context) error
+	})
+	if !ok {
+		return ErrQueueUnavailable
+	}
+
+	if err := pinger.Ping(ctx); err != nil {
+		return fmt.Errorf("%w: %v", ErrQueueUnavailable, err)
+	}
+
+	return nil
+}

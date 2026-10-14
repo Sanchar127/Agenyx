@@ -26,7 +26,7 @@ func TestGatewayHealthEndpoints(t *testing.T) {
 		wantBody   string
 	}{
 		{"/health/live", http.MethodGet, http.StatusOK, `"status":"alive"`},
-		{"/health/ready", http.MethodGet, http.StatusOK, `"status":"ready"`},
+		{"/health/ready", http.MethodGet, http.StatusServiceUnavailable, `"status":"not_ready"`},
 		{"/health/live", http.MethodPost, http.StatusMethodNotAllowed, ""},
 		{"/health/ready", http.MethodPost, http.StatusMethodNotAllowed, ""},
 		{"/health/upstream", http.MethodPost, http.StatusMethodNotAllowed, ""},

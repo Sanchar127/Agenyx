@@ -1,14 +1,12 @@
 package gateway
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -96,39 +94,16 @@ func TestRateLimiterAllowsRequestsWithinLimit(t *testing.T) {
 	}
 }
 
-func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/agent/runs/test-execution" {
-				t.Errorf("upstream path = %q, want /v1/agent/runs/test-execution", r.URL.Path)
-			}
-
-			if r.URL.RawQuery != "limit=5" {
-				t.Errorf("upstream query = %q, want limit=5", r.URL.RawQuery)
-			}
-
-			if r.Header.Get("X-Forwarded-Proto") != "https" {
-				t.Errorf("X-Forwarded-Proto = %q, want https",
-					r.Header.Get("X-Forwarded-Proto"))
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, `{"ok":true}`)
-		},
-	))
-	defer upstream.Close()
-
-	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
-
-	logger := log.New(io.Discard, "", 0)
+func TestGatewayDoesNotProxyToOrchestrator(t *testing.T) {
+	t.Setenv("ORCHESTRATOR_URL", "http://127.0.0.1:1")
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
 	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
-	gateway, err := NewGatewayServer(logger)
+
+	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
 
-	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(
 		http.MethodGet,
 		"/v1/agent/runs/test-execution?limit=5",
@@ -136,24 +111,12 @@ func TestGatewayForwardsRequestToOrchestrator(t *testing.T) {
 	)
 	req.Header.Set("Authorization", "Bearer test-api-key")
 
+	rec := httptest.NewRecorder()
 	gateway.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("gateway status = %d, want %d; body: %s",
-			rec.Code, http.StatusOK, rec.Body.String())
-	}
-
-	if rec.Header().Get("X-Request-ID") == "" {
-		t.Error("gateway response missing X-Request-ID")
-	}
-
-	var body map[string]bool
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("invalid JSON response: %v", err)
-	}
-
-	if !body["ok"] {
-		t.Errorf("unexpected upstream response: %v", body)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s",
+			rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
@@ -202,88 +165,25 @@ func TestWriteJSON(t *testing.T) {
 	}
 }
 
-func TestGatewayStreamsUpstreamChunks(t *testing.T) {
-	release := make(chan struct{})
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			t.Error("upstream ResponseWriter does not support flushing")
-			return
-		}
-
-		if _, err := io.WriteString(w, "data: first\n\n"); err != nil {
-			t.Errorf("write first chunk: %v", err)
-			return
-		}
-		flusher.Flush()
-
-		// Keep the upstream response open until the test receives the first chunk.
-		<-release
-
-		if _, err := io.WriteString(w, "data: second\n\n"); err != nil {
-			t.Errorf("write second chunk: %v", err)
-		}
-	}))
-	defer upstream.Close()
-
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-	}()
-
-	t.Setenv("ORCHESTRATOR_URL", upstream.URL)
-
+func TestGatewayDoesNotProxyStreamingRequests(t *testing.T) {
+	t.Setenv("ORCHESTRATOR_URL", "http://127.0.0.1:1")
 	t.Setenv("AGENEYX_API_KEY", "test-api-key")
 	t.Setenv("AGENEYX_API_KEY_PERMISSIONS", "agents:run,tasks:read")
+
 	gateway, err := NewGatewayServer(log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("create gateway: %v", err)
 	}
 
-	gatewayServer := httptest.NewServer(gateway.Handler())
-	defer gatewayServer.Close()
+	req := httptest.NewRequest(http.MethodPost, "/v1/agent/stream", nil)
+	req.Header.Set("Authorization", "Bearer test-api-key")
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	streamReq, err := http.NewRequest(http.MethodPost, gatewayServer.URL+"/v1/agent/stream", nil)
-	if err != nil {
-		t.Fatalf("create stream request: %v", err)
-	}
-	streamReq.Header.Set("Authorization", "Bearer test-api-key")
+	rec := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(rec, req)
 
-	resp, err := client.Do(streamReq)
-	if err != nil {
-		t.Fatalf("request gateway: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-
-	reader := bufio.NewReader(resp.Body)
-	firstLine, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read first streamed chunk before upstream finished: %v", err)
-	}
-	if firstLine != "data: first\n" {
-		t.Fatalf("first streamed line = %q, want %q", firstLine, "data: first\n")
-	}
-
-	close(release)
-
-	remaining, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read remaining stream: %v", err)
-	}
-	if !strings.Contains(string(remaining), "data: second\n\n") {
-		t.Fatalf("second chunk missing from stream: %q", remaining)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body=%s",
+			rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
 
@@ -409,7 +309,7 @@ func TestGatewayAPIKeyAuthentication(t *testing.T) {
 	}{
 		{name: "missing token", wantStatus: http.StatusUnauthorized},
 		{name: "invalid token", token: "wrong-key", wantStatus: http.StatusUnauthorized},
-		{name: "valid token", token: "test-api-key", wantStatus: http.StatusOK},
+		{name: "valid token", token: "test-api-key", wantStatus: http.StatusNotFound},
 	}
 
 	for _, tt := range tests {

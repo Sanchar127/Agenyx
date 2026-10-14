@@ -1,15 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/netip"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -22,13 +21,14 @@ type GatewayServer struct {
 	handler http.Handler
 }
 
-// NewGatewayServer creates the gateway with the legacy upstream proxy.
+// NewGatewayServer creates a gateway without an attached orchestrator.
+// This constructor is useful for middleware and health endpoint tests.
 func NewGatewayServer(logger *log.Logger) (*GatewayServer, error) {
 	return newGatewayServer(logger, nil)
 }
 
-// NewGatewayServerWithOrchestrator creates the production gateway with direct
-// Go orchestrator routes. Other authorized API routes retain the upstream proxy.
+// NewGatewayServerWithOrchestrator creates the production gateway.
+// All supported agent execution routes are handled directly in Go.
 func NewGatewayServerWithOrchestrator(
 	logger *log.Logger,
 	service *orchestrator.Service,
@@ -36,6 +36,7 @@ func NewGatewayServerWithOrchestrator(
 	if service == nil {
 		return nil, errors.New("orchestrator service must not be nil")
 	}
+
 	return newGatewayServer(logger, service)
 }
 
@@ -68,17 +69,24 @@ func newGatewayServer(
 	if err != nil {
 		return nil, fmt.Errorf("load gateway recipe: %w", err)
 	}
+
 	apiKey := os.Getenv("AGENEYX_API_KEY")
 	if strings.TrimSpace(apiKey) == "" {
-		return nil, errors.New("AGENEYX_API_KEY must be set to a non-empty secret")
+		return nil, errors.New(
+			"AGENEYX_API_KEY must be set to a non-empty secret",
+		)
 	}
 
-	permissions, err := parseAPIPermissions(os.Getenv("AGENEYX_API_KEY_PERMISSIONS"))
+	permissions, err := parseAPIPermissions(
+		os.Getenv("AGENEYX_API_KEY_PERMISSIONS"),
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	trustedProxies, err := parseTrustedProxies(os.Getenv("AGENEYX_TRUSTED_PROXIES"))
+	trustedProxies, err := parseTrustedProxies(
+		os.Getenv("AGENEYX_TRUSTED_PROXIES"),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -87,117 +95,80 @@ func newGatewayServer(
 		return resolvedClientIP(r, trustedProxies)
 	}
 
-	upstream := os.Getenv("ORCHESTRATOR_URL")
-	if upstream == "" {
-		upstream = "http://orchestrator:8001"
-	}
-
-	target, err := url.Parse(upstream)
-	if err != nil {
-		return nil, err
-	}
-
-	if target.Scheme != "http" && target.Scheme != "https" {
-		return nil, &url.Error{
-			Op:  "parse orchestrator URL",
-			URL: upstream,
-			Err: errInvalidUpstreamScheme,
-		}
-	}
-
-	proxy := httputil.NewSingleHostReverseProxy(target)
-
-	originalDirector := proxy.Director
-	proxy.Director = func(r *http.Request) {
-		originalDirector(r)
-
-		r.Header.Set("X-Forwarded-Proto", "https")
-
-		// Do not forward an arbitrary client-supplied forwarding chain.
-		// Forward only the client address resolved using trusted proxies.
-		r.Header.Set("X-Forwarded-For", resolveClientIP(r))
-	}
-
-	proxy.Transport = &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   20,
-		IdleConnTimeout:       90 * time.Second,
-	}
-
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Printf(
-			`{"event":"upstream_error","request_id":%q,"error":%q}`,
-			r.Header.Get("X-Request-ID"),
-			err.Error(),
-		)
-
-		http.Error(
-			w,
-			`{"error":"upstream unavailable"}`,
-			http.StatusBadGateway,
-		)
-	}
-
 	mux := http.NewServeMux()
 
+	// Liveness only checks whether the Go gateway is running.
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "alive",
+		})
 	})
 
-	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
+	// Readiness checks whether the gateway can access its task queue.
+	readyHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-	})
-
-	orchestratorHealthHandler := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
 			return
 		}
 
-		r.URL.Path = "/health"
-		r.URL.RawPath = ""
-		proxy.ServeHTTP(w, r)
+		if service == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+			})
+			return
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		if err := service.Ready(ctx); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+				"status": "not_ready",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ready",
+		})
 	}
 
-	// Gateway health and orchestrator health are separate checks.
-	mux.HandleFunc("/health/orchestrator", orchestratorHealthHandler)
+	mux.HandleFunc("/health/ready", readyHandler)
+	mux.HandleFunc("/health/orchestrator", readyHandler)
+	mux.HandleFunc("/health/upstream", readyHandler)
 
-	// Keep the previous endpoint for backward compatibility.
-	mux.HandleFunc("/health/upstream", orchestratorHealthHandler)
-
+	// Preserve the old Python health endpoint's response shape.
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		r.URL.Path = "/health"
-		r.URL.RawPath = ""
-		proxy.ServeHTTP(w, r)
+		if r.Method != http.MethodGet {
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{
+				"error": "method not allowed",
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
 	})
 
-	// Migrate only the run and execution-status endpoints to Go.
-	// The existing authorization middleware still runs before these handlers.
+	// Register execution routes directly in Go.
 	if service != nil {
 		orchestratorHandler := orchestrator.HTTPHandler(service)
+
 		mux.Handle("POST /v1/agent/run", orchestratorHandler)
 		mux.Handle("GET /v1/agent/runs/{execution_id}", orchestratorHandler)
 	}
 
-	// Keep other authorized API routes on the existing upstream during migration.
-	mux.Handle("/v1/", proxy)
-
+	// No reverse proxy: unsupported API routes return 404.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	})
@@ -206,7 +177,6 @@ func newGatewayServer(
 		gatewaySpec.RateLimit.RequestsPerSecond,
 		gatewaySpec.RateLimit.Burst,
 	)
-
 	if err != nil {
 		return nil, err
 	}

@@ -152,31 +152,6 @@ services:
 
 
   # ─────────────────────────────────────────────
-  # Orchestrator
-  # ─────────────────────────────────────────────
-  orchestrator:
-    build:
-      context: ./orchestrator
-
-    container_name: agenyx-orchestrator
-
-    environment:
-      AGENTYX_VALKEY_URL: redis://valkey:6379/0
-      AGENTYX_TASK_STREAM: agenyx:tasks
-      AGENTYX_CONSUMER_GROUP: agenyx-workers
-      AGENTYX_AGENT_URL: http://agent:8000
-
-    depends_on:
-      - valkey
-      - agent
-
-    ports:
-      - "8001:8001"
-
-    restart: unless-stopped
-
-
-  # ─────────────────────────────────────────────
   # Worker
   # ─────────────────────────────────────────────
   worker:
@@ -255,10 +230,10 @@ services:
     container_name: agenyx-gateway
 
     depends_on:
-      - orchestrator
+      - valkey
 
     environment:
-      ORCHESTRATOR_URL: http://orchestrator:8001
+      AGENTYX_VALKEY_URL: redis://valkey:6379/0
       AGENEYX_API_KEY_PERMISSIONS: agents:run,tasks:read
       AGENEYX_API_KEY: ${AGENEYX_API_KEY:?AGENEYX_API_KEY must be set in .env}
 
