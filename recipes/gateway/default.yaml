@@ -1,0 +1,14 @@
+apiVersion: agenyx.ai/v1alpha1
+kind: GatewayRecipe
+
+metadata:
+  name: default-gateway
+  version: "1.0.0"
+
+spec:
+  rateLimit:
+    requestsPerSecond: 10
+    burst: 20
+
+  request:
+    maxBodyBytes: 1048576
