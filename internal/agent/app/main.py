@@ -4,6 +4,8 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 
 from app.agent_runtime.persistence.service import (
     PostgreSQLExecutionPersistence,
@@ -17,6 +19,8 @@ from app.core.config import get_settings
 from app.core.errors import AgenyxError
 from app.db.session import AsyncSessionFactory
 from app.inference.client import InferenceClient
+from app.mcp_gateway.auth import BearerTokenMiddleware
+from app.mcp_gateway.routing import MCPRootPathMiddleware
 from app.router.client import SemanticRouterClient
 from app.sandbox.client import ToolSandboxClient
 from app.tools.builtin import create_tool_registry
@@ -76,44 +80,91 @@ def get_runtime() -> AgentRuntime:
     return runtime
 
 
+# The MCP server shares FastAPI's listener; it does not bind another port.
+mcp_server = MCPServer(
+    name="agenyx-mcp-gateway",
+    version="0.1.0",
+)
+
+mcp_app = mcp_server.streamable_http_app(
+    streamable_http_path="/",
+    json_response=True,
+    stateless_http=True,
+    max_request_body_size=1024 * 1024,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            host.strip()
+            for host in settings.mcp_gateway_allowed_hosts.split(",")
+            if host.strip()
+        ],
+        allowed_origins=[
+            origin.strip()
+            for origin in settings.mcp_gateway_allowed_origins.split(",")
+            if origin.strip()
+        ],
+    ),
+)
+
+mcp_app.add_middleware(
+    BearerTokenMiddleware,
+    token=settings.mcp_gateway_token or "",
+)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # -------------------------------------------------------------
-    # Crash Recovery & Startup Check
-    #
-    # Scan for stale/orphaned executions interrupted by an unexpected
-    # application crash or process restart before handling traffic.
-    # -------------------------------------------------------------
-    async with AsyncSessionFactory() as db_session:
-        try:
-            detector = RestartDetector(
-                db_session=db_session,
-                stale_threshold_seconds=getattr(settings, "stale_threshold_seconds", 300),
-            )
-            # If scan_and_flag_orphaned_executions is synchronous, call directly;
-            # if async, await detector.scan_and_flag_orphaned_executions()
-            flagged = detector.scan_and_flag_orphaned_executions()
-            if flagged:
-                logger.info(
-                    "Crash recovery check completed. Flagged %d orphaned execution(s): %s",
-                    len(flagged),
-                    flagged,
-                )
-        except Exception:
-            logger.exception("Failed to run crash recovery scan during startup.")
+    # Authentication must be configured before accepting any traffic.
+    if not settings.mcp_gateway_token:
+        raise RuntimeError(
+            "AGENEYX_MCP_GATEWAY_TOKEN must be set to enable the MCP gateway."
+        )
 
-    yield
+    try:
+        # The MCP session manager is created lazily by streamable_http_app().
+        # Start it within the host application's lifespan.
+        async with mcp_server.session_manager.run():
+            # Crash recovery: mark executions orphaned by a previous crash.
+            async with AsyncSessionFactory() as db_session:
+                try:
+                    detector = RestartDetector(
+                        db_session=db_session,
+                        stale_threshold_seconds=getattr(
+                            settings,
+                            "stale_threshold_seconds",
+                            300,
+                        ),
+                    )
+                    flagged = detector.scan_and_flag_orphaned_executions()
+                    if flagged:
+                        logger.info(
+                            "Crash recovery check completed. Flagged %d "
+                            "orphaned execution(s): %s",
+                            len(flagged),
+                            flagged,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed to run crash recovery scan during startup."
+                    )
 
-    # Cleanup open HTTP sessions on shutdown
-    await router_client.close()
-    await inference_client.close()
-    await sandbox.close()
-
+            yield
+    finally:
+        # Preserve existing HTTP-client cleanup even if startup or shutdown
+        # raises after entering the lifespan.
+        await router_client.close()
+        await inference_client.close()
+        await sandbox.close()
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    MCPRootPathMiddleware,
+    mcp_app=mcp_app,
 )
 
 app.add_exception_handler(
@@ -124,3 +175,7 @@ app.add_exception_handler(
 app.include_router(
     create_router(get_runtime),
 )
+
+# Mount after the existing API routes so their paths retain precedence.
+# The MCP sub-application handles "/" internally, exposed externally as /mcp.
+app.mount("/mcp", mcp_app, name="mcp")
