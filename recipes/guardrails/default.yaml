@@ -8,23 +8,41 @@ metadata:
 spec:
   input:
     enabled: true
+    # Legacy input-stage error policy. Detector errors and timeouts use
+    # failurePolicy below.
     onError: block
     maxInputLength: 10000
 
     detectors:
       - type: prompt-injection
         enabled: true
+        provider: classifier
         onViolation: block
 
       - type: jailbreak
         enabled: true
+        provider: classifier
         onViolation: block
 
       - type: pii
         enabled: true
-        onViolation: block
+        provider: pattern
+        onViolation: redact
         categories:
           - email
           - phone
           - ip-address
           - credit-card
+
+  execution:
+    timeoutMs: 500
+    maxConcurrentChecks: 32
+
+  modelRuntime:
+    endpoint: "${GUARDRAILS_MODEL_URL}"
+    protocol: http
+    timeoutMs: 300
+
+  failurePolicy:
+    onDetectorError: block
+    onTimeout: block
