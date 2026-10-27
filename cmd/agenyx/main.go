@@ -11,12 +11,29 @@ import (
 	"time"
 
 	"github.com/sanchar127/agenyx/internal/gateway"
+	"github.com/sanchar127/agenyx/internal/guardrails"
 	"github.com/sanchar127/agenyx/internal/orchestrator"
 	taskworker "github.com/sanchar127/agenyx/internal/worker"
 )
 
 func main() {
 	logger := log.New(os.Stdout, "", 0)
+
+	// Validate the effective input guardrails configuration before starting
+	// infrastructure or accepting agent requests.
+	guardrailsConfig, err := guardrails.LoadFromEnv()
+	if err != nil {
+		logger.Fatalf("initialize input guardrails: %v", err)
+	}
+
+	guardrailsSpec := guardrailsConfig.Spec()
+	logger.Printf(
+		"input guardrails configuration loaded: recipe=%s version=%s path=%s enabled=%t",
+		guardrailsConfig.Name(),
+		guardrailsConfig.Version(),
+		guardrailsConfig.Path(),
+		guardrailsSpec.Input.Enabled,
+	)
 
 	queue, err := orchestrator.NewValkeyQueueFromEnv()
 	if err != nil {
