@@ -5,7 +5,8 @@ services:
   # ─────────────────────────────────────────────
   agent:
     build:
-      context: ./agent
+      context: ./internal/agent
+      dockerfile: Dockerfile
 
     container_name: agenyx-agent
 
@@ -22,49 +23,55 @@ services:
       - "8000:8000"
 
     depends_on:
-      - sandbox
-      - inference
-      - router
+      postgres:
+        condition: service_healthy
+      sandbox:
+        condition: service_started
+      inference:
+        condition: service_started
+      router:
+        condition: service_started
 
     restart: unless-stopped
 
-    # ─────────────────────────────────────────────
+
+  # ─────────────────────────────────────────────
   # PostgreSQL - durable Agent execution storage
   # ─────────────────────────────────────────────
   postgres:
-      image: postgres:17-alpine
+    image: postgres:17-alpine
 
-      container_name: agenyx-postgres
+    container_name: agenyx-postgres
 
-      environment:
-        POSTGRES_DB: agenyx
-        POSTGRES_USER: agenyx
-        POSTGRES_PASSWORD: agenyx_dev_password
+    environment:
+      POSTGRES_DB: agenyx
+      POSTGRES_USER: agenyx
+      POSTGRES_PASSWORD: agenyx_dev_password
 
-      volumes:
-        - postgres_data:/var/lib/postgresql/data
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
 
-      ports:
-        - "5432:5432"
+    ports:
+      - "5432:5432"
 
-      healthcheck:
-        test:
-          - CMD-SHELL
-          - pg_isready -U agenyx -d agenyx
-        interval: 5s
-        timeout: 5s
-        retries: 10
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U agenyx -d agenyx
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-      restart: unless-stopped
+    restart: unless-stopped
 
-    # ─────────────────────────────────────────────
+
+  # ─────────────────────────────────────────────
   # Semantic Router - Go model selection service
   # ─────────────────────────────────────────────
-
-
   router:
     build:
       context: ./router
+      dockerfile: Dockerfile
 
     container_name: agenyx-router
 
@@ -76,6 +83,7 @@ services:
 
     ports:
       - "8005:8005"
+
     restart: unless-stopped
 
 
@@ -84,7 +92,8 @@ services:
   # ─────────────────────────────────────────────
   sandbox:
     build:
-      context: ./sandbox
+      context: ./internal/sandbox
+      dockerfile: Dockerfile
 
     container_name: agenyx-sandbox
 
@@ -109,17 +118,20 @@ services:
       - /tmp:size=16m,mode=1777
 
     restart: unless-stopped
-    # ─────────────────────────────────────────────
+
+
+  # ─────────────────────────────────────────────
   # Inference - OpenAI-compatible LLM gateway
   # ─────────────────────────────────────────────
   inference:
     build:
       context: ./inference
+      dockerfile: Dockerfile
 
     container_name: agenyx-inference
 
     volumes:
-    - ./internal/inference:/app
+      - ./inference:/app
 
     environment:
       INFERENCE_BACKEND_BASE_URL: http://ollama:11434/v1
@@ -136,15 +148,12 @@ services:
       INFERENCE_MAX_KEEPALIVE_CONNECTIONS: "20"
       INFERENCE_MAX_FAILOVER_ATTEMPTS: "3"
 
-
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
     expose:
       - "8004"
 
-    # Keep this only if you intentionally want external access
-    # to the inference service for development/testing.
     ports:
       - "8004:8004"
 
@@ -152,16 +161,17 @@ services:
 
 
   # ─────────────────────────────────────────────
-  # Worker
+  # Worker - Python task worker
   # ─────────────────────────────────────────────
   worker:
     build:
       context: ./worker
+      dockerfile: Dockerfile
 
     container_name: agenyx-worker
 
     volumes:
-      - ./internal/worker:/app
+      - ./worker:/app
 
     environment:
       AGENTYX_VALKEY_URL: redis://valkey:6379/0
@@ -194,7 +204,8 @@ services:
 
     restart: unless-stopped
 
-    # ─────────────────────────────────────────────
+
+  # ─────────────────────────────────────────────
   # Ollama - local LLM runtime
   # ─────────────────────────────────────────────
   ollama:
@@ -214,14 +225,15 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities:
+                - gpu
 
     restart: unless-stopped
+
 
   # ─────────────────────────────────────────────
   # Gateway
   # ─────────────────────────────────────────────
-
   gateway:
     build:
       context: ./internal/gateway
