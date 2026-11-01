@@ -1,0 +1,41 @@
+inference:
+  default_model: qwen2.5:7b
+
+  providers:
+    - name: ollama-local
+      enabled: true
+      type: openai-compatible
+      base_url: http://ollama:11434/v1
+      api_key: ollama
+
+    - name: vllm-local
+      enabled: false
+      type: openai-compatible
+      base_url: http://vllm:8000/v1
+      api_key: ""
+
+    - name: openai-cloud
+      enabled: false
+      type: openai-compatible
+      base_url: https://api.openai.com/v1
+      api_key: ${OPENAI_API_KEY}
+
+  models:
+    - id: qwen2.5:7b
+      provider: ollama-local
+
+    - id: meta-llama/Llama-3.1-8B-Instruct
+      provider: vllm-local
+
+    - id: gpt-4.1
+      provider: openai-cloud
+
+  failover: {}
+
+runtime:
+  max_retries: 2
+  request_timeout_seconds: 120
+  max_connections: 100
+  max_keepalive_connections: 20
+  max_concurrency: 10
+  max_failover_attempts: 3

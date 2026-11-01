@@ -20,3 +20,6 @@ opentelemetry-instrumentation-httpx
 
 pytest
 pytest-asyncio
+
+# YAML configuration
+PyYAML>=6.0,<7.0
