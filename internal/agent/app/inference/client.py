@@ -22,12 +22,14 @@ class InferenceClient:
         self,
         *,
         base_url: str,
+        service_api_key: str,
         timeout: float = 120.0,
         max_connections: int = 100,
         max_keepalive_connections: int = 20,
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
+        self.service_api_key = service_api_key
         self.timeout = timeout
         self.retry_policy = retry_policy or RetryPolicy()
 
@@ -159,6 +161,9 @@ class InferenceClient:
             response = await self._client.post(
                 url,
                 json=payload,
+                headers={
+                    "X-Agenyx-Service-Key": self.service_api_key,
+                },
             )
 
         except httpx.ConnectError as exc:
