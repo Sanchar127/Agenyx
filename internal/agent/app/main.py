@@ -36,6 +36,7 @@ router_client = SemanticRouterClient(
 
 inference_client = InferenceClient(
     base_url=settings.inference_base_url,
+    service_api_key=settings.inference_service_api_key,
     timeout=settings.inference_timeout_seconds,
 )
 
