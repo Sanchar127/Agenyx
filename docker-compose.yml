@@ -138,18 +138,10 @@ services:
       - ./inference:/app
 
     environment:
-      INFERENCE_BACKEND_BASE_URL: http://ollama:11434/v1
-      INFERENCE_BACKEND_API_KEY: ollama
 
-      INFERENCE_DEFAULT_MODEL: qwen2.5:7b
 
-      INFERENCE_PROVIDER_NAMES: ollama-local
       INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY:?INFERENCE_SERVICE_API_KEY must be set}
-      INFERENCE_REQUEST_TIMEOUT_SECONDS: "120"
-      INFERENCE_MAX_RETRIES: "2"
-      INFERENCE_MAX_CONNECTIONS: "100"
-      INFERENCE_MAX_KEEPALIVE_CONNECTIONS: "20"
-      INFERENCE_MAX_FAILOVER_ATTEMPTS: "3"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -209,32 +201,6 @@ services:
 
 
   # ─────────────────────────────────────────────
-  # Ollama - local LLM runtime
-  # ─────────────────────────────────────────────
-  ollama:
-    image: ollama/ollama:latest
-
-    container_name: agenyx-ollama
-
-    volumes:
-      - ollama_data:/root/.ollama
-
-    ports:
-      - "11434:11434"
-
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities:
-                - gpu
-
-    restart: unless-stopped
-
-
-  # ─────────────────────────────────────────────
   # Gateway
   # ─────────────────────────────────────────────
   gateway:
@@ -267,4 +233,3 @@ services:
 volumes:
   valkey_data:
   postgres_data:
-  ollama_data:

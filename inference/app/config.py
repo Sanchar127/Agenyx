@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+from pydantic import AnyHttpUrl, BaseModel, Field, ValidationInfo, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -24,17 +24,26 @@ class ProviderConfig(BaseModel):
     """Configuration for one inference provider."""
 
     name: str
+    enabled: bool = True
     type: Literal["openai-compatible"] = "openai-compatible"
     base_url: AnyHttpUrl
     api_key: str = ""
 
     @field_validator("api_key", mode="before")
     @classmethod
-    def expand_api_key_environment_variable(cls, value: str) -> str:
-        """Expand ${ENV_VAR} references in provider API keys."""
+    def expand_api_key_environment_variable(
+        cls,
+        value: str,
+        info: ValidationInfo,
+    ) -> str:
+        """Expand API-key environment variables for enabled providers."""
 
         if not isinstance(value, str):
             return value
+
+        # Disabled providers do not need credentials.
+        if info.data.get("enabled") is False:
+            return ""
 
         pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -150,8 +159,8 @@ class Settings(BaseSettings):
 
     @property
     def providers(self) -> list[str]:
-        """Return configured provider names in priority order."""
-        return [provider.name for provider in self.inference.providers]
+        """Return enabled provider names in priority order."""
+        return list(self.provider_backend_configs)
 
     @property
     def provider_backend_configs(self) -> dict[str, dict[str, str]]:
@@ -167,10 +176,13 @@ class Settings(BaseSettings):
 
     @property
     def models(self) -> list[tuple[str, str]]:
-        """Return model-to-provider mappings."""
+        """Return models belonging to enabled providers."""
+        enabled_providers = set(self.provider_backend_configs)
+
         return [
             (model.id, model.provider)
             for model in self.inference.models
+            if model.provider in enabled_providers
         ]
 
     @property
