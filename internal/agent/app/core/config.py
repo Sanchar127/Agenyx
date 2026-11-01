@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     # Inference Service
     inference_base_url: str = "http://inference:8004"
     inference_timeout_seconds: float = 120.0
+    inference_service_api_key: str = Field(min_length=1, repr=False)
 
     # Agent
     agent_max_steps: int = 8

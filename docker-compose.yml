@@ -18,6 +18,9 @@ services:
       AGENTYX_INFERENCE_BASE_URL: http://inference:8004
       AGENTYX_SANDBOX_BASE_URL: http://sandbox:9000
       AGENTYX_DATABASE_URL: postgresql+asyncpg://agenyx:agenyx_dev_password@postgres:5432/agenyx
+
+      AGENTYX_INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY:?INFERENCE_SERVICE_API_KEY must be set}
+
       AGENEYX_MCP_GATEWAY_TOKEN: ${AGENEYX_MCP_GATEWAY_TOKEN:?AGENEYX_MCP_GATEWAY_TOKEN must be set}
 
     ports:

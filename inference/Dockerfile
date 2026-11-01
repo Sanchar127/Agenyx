@@ -19,6 +19,7 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY config ./config
 
 RUN chown -R 10001:10001 /app
 

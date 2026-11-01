@@ -1,309 +1,296 @@
+import os
+import re
 from functools import lru_cache
+from pathlib import Path
+from typing import Literal
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyHttpUrl, BaseModel, Field, field_validator
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
+
+
+CONFIG_FILE = (
+    Path(__file__).resolve().parent.parent
+    / "config"
+    / "inference.yaml"
+)
+
+
+class ProviderConfig(BaseModel):
+    """Configuration for one inference provider."""
+
+    name: str
+    type: Literal["openai-compatible"] = "openai-compatible"
+    base_url: AnyHttpUrl
+    api_key: str = ""
+
+    @field_validator("api_key", mode="before")
+    @classmethod
+    def expand_api_key_environment_variable(cls, value: str) -> str:
+        """Expand ${ENV_VAR} references in provider API keys."""
+
+        if not isinstance(value, str):
+            return value
+
+        pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+        def replace(match: re.Match[str]) -> str:
+            variable_name = match.group(1)
+            variable_value = os.environ.get(variable_name)
+
+            if not variable_value:
+                raise ValueError(
+                    f"Environment variable '{variable_name}' "
+                    "is missing or empty"
+                )
+
+            return variable_value
+
+        return pattern.sub(replace, value)
+
+
+    def normalized_base_url(self) -> str:
+        """Return the provider URL without a trailing slash."""
+        return str(self.base_url).rstrip("/")
+
+
+class ModelConfig(BaseModel):
+    """Model-to-provider mapping."""
+
+    id: str
+    provider: str
+
+
+class InferenceConfig(BaseModel):
+    """Inference provider, model, and failover configuration."""
+
+    default_model: str
+    providers: list[ProviderConfig] = Field(default_factory=list)
+    models: list[ModelConfig] = Field(default_factory=list)
+    failover: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class RuntimeConfig(BaseModel):
+    """Inference runtime configuration."""
+
+    max_retries: int = 2
+    request_timeout_seconds: float = 120.0
+    max_connections: int = 100
+    max_keepalive_connections: int = 20
+    max_concurrency: int = 10
+    max_failover_attempts: int = 3
 
 
 class Settings(BaseSettings):
-    """Application configuration."""
+    """Application configuration loaded from YAML and environment."""
 
     app_name: str = "agenyx-inference"
     app_version: str = "0.1.0"
     log_level: str = "INFO"
     log_json: bool = True
 
-    # -----------------------------------------------------
-    # Provider configuration
-    # -----------------------------------------------------
-
-    # Comma-separated provider names in priority order.
-    #
-    # Example:
-    #
-    # INFERENCE_PROVIDER_NAMES=ollama-local,vllm-local,openai
-    #
-    provider_names: str = "ollama-local"
-
-    # Per-provider backend configuration.
-    #
-    # Format:
-    #
-    # provider_name=base_url|api_key
-    #
-    # Multiple providers are separated by commas.
-    #
-    # Example:
-    #
-    # ollama-local=http://localhost:11434/v1|ollama,
-    # vllm-local=http://localhost:8001/v1|
-    #
-    provider_backends: str = (
-        "ollama-local=http://localhost:11434/v1|ollama"
-    )
-
-    # Model-specific provider failover routes.
-    #
-    # Format:
-    #
-    # model_id=provider1,provider2
-    #
-    model_failover_routes: str = ""
-
-    # -----------------------------------------------------
-    # Model configuration
-    # -----------------------------------------------------
-
-    # Comma-separated model-to-provider mappings.
-    #
-    # Format:
-    #
-    # model_id=provider_name
-    #
-    # Example:
-    #
-    # INFERENCE_MODEL_DEFINITIONS=qwen2.5:7b=ollama-local,llama3.2:3b=ollama-local
-    #
-    model_definitions: str = (
-        "qwen2.5:7b=ollama-local,"
-        "llama3.2:3b=ollama-local"
-    )
-
-    # Used when a client does not explicitly provide "model".
-    default_model: str = "qwen2.5:7b"
-
-    # -----------------------------------------------------
-    # Provider backend defaults
-    # -----------------------------------------------------
-
-    # Default OpenAI-compatible backend configuration.
-    backend_base_url: str = "http://localhost:11434/v1"
-
-    backend_api_key: str = "ollama"
+    inference: InferenceConfig
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
 
     service_api_key: str = ""
-
-    # -----------------------------------------------------
-    # HTTP / retry configuration
-    # -----------------------------------------------------
-
-    max_retries: int = 2
-
-    request_timeout_seconds: float = 120.0
-
-    max_connections: int = 100
-
-    max_keepalive_connections: int = 20
-
-    # max_inference_concurrency: int = 10
-
-    max_concurrency: int = 10
-    # -----------------------------------------------------
-    # Failover
-    # -----------------------------------------------------
-
-    max_failover_attempts: int = 3
-
-    # -----------------------------------------------------
-    # Tenant model access
-    # -----------------------------------------------------
 
     tenant_model_access: str = (
         "tenant-a=qwen2.5:7b, llama3.2:3b;"
         "tenant-b=llama3.2:3b"
     )
 
-    # -----------------------------------------------------
-    # Request validation / limits
-    # -----------------------------------------------------
-
     max_request_body_bytes: int = 1_048_576
-
     max_messages: int = 100
-
     max_message_content_chars: int = 100_000
-
     max_total_message_content_chars: int = 500_000
 
-    # -----------------------------------------------------
-    # OpenTelemetry
-    # -----------------------------------------------------
-
     otel_service_name: str = "agenyx-inference"
-
     otel_service_namespace: str = "agenyx"
-
     otel_exporter_otlp_endpoint: str = (
         "http://agenyx-otel-collector.monitoring.svc.cluster.local:4317"
     )
 
     model_config = SettingsConfigDict(
         env_prefix="INFERENCE_",
+        env_nested_delimiter="__",
         case_sensitive=False,
+        extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Load settings with environment variables overriding YAML."""
+
+        return (
+            init_settings,
+            env_settings,
+            YamlConfigSettingsSource(
+                settings_cls,
+                yaml_file=CONFIG_FILE,
+                deep_merge=True,
+            ),
+            dotenv_settings,
+            file_secret_settings,
+        )
+
+    # -----------------------------------------------------
+    # Provider compatibility properties
+    # -----------------------------------------------------
 
     @property
     def providers(self) -> list[str]:
         """Return configured provider names in priority order."""
-
-        return [
-            name.strip()
-            for name in self.provider_names.split(",")
-            if name.strip()
-        ]
+        return [provider.name for provider in self.inference.providers]
 
     @property
     def provider_backend_configs(self) -> dict[str, dict[str, str]]:
-        """
-        Return backend configuration for each provider.
-
-        Format:
-
-            provider_name=base_url|api_key
-        """
-
-        configs: dict[str, dict[str, str]] = {}
-
-        for definition in self.provider_backends.split(","):
-            definition = definition.strip()
-
-            if not definition:
-                continue
-
-            provider_name, separator, backend = definition.partition("=")
-
-            if not separator:
-                raise ValueError(
-                    "Invalid provider backend definition "
-                    f"'{definition}'; "
-                    "expected 'provider_name=base_url|api_key'"
-                )
-
-            provider_name = provider_name.strip()
-
-            if not provider_name:
-                raise ValueError(
-                    "Provider backend definition contains "
-                    "an empty provider_name"
-                )
-
-            base_url, separator, api_key = backend.partition("|")
-
-            if not separator:
-                raise ValueError(
-                    "Invalid provider backend definition "
-                    f"'{definition}'; "
-                    "expected 'provider_name=base_url|api_key'"
-                )
-
-            base_url = base_url.strip()
-            api_key = api_key.strip()
-
-            if not base_url:
-                raise ValueError(
-                    "Provider backend definition contains "
-                    "an empty base_url"
-                )
-
-            configs[provider_name] = {
-                "base_url": base_url,
-                "api_key": api_key,
+        return {
+            provider.name: {
+                "type": provider.type,
+                "base_url": provider.normalized_base_url(),
+                "api_key": provider.api_key,
             }
-
-        return configs
+            for provider in self.inference.providers
+            if provider.enabled
+        }
 
     @property
     def models(self) -> list[tuple[str, str]]:
-        """
-        Return configured model-to-provider mappings.
-
-        Each mapping has the form:
-
-            (model_id, provider_name)
-        """
-
-        models: list[tuple[str, str]] = []
-
-        for definition in self.model_definitions.split(","):
-            definition = definition.strip()
-
-            if not definition:
-                continue
-
-            model_id, separator, provider_name = definition.partition("=")
-
-            if not separator:
-                raise ValueError(
-                    "Invalid model definition "
-                    f"'{definition}'; expected 'model_id=provider_name'"
-                )
-
-            model_id = model_id.strip()
-            provider_name = provider_name.strip()
-
-            if not model_id:
-                raise ValueError(
-                    "Model definition contains an empty model_id"
-                )
-
-            if not provider_name:
-                raise ValueError(
-                    "Model definition contains an empty provider_name"
-                )
-
-            models.append(
-                (model_id, provider_name)
-            )
-
-        return models
+        """Return model-to-provider mappings."""
+        return [
+            (model.id, model.provider)
+            for model in self.inference.models
+        ]
 
     @property
     def model_failover_providers(self) -> dict[str, tuple[str, ...]]:
-        """
-        Return the ordered provider failover route for each model.
+        """Return ordered failover providers for each model."""
+        return {
+            model_id: tuple(providers)
+            for model_id, providers in self.inference.failover.items()
+        }
 
-        Format:
+    @property
+    def default_model(self) -> str:
+        return self.inference.default_model
 
-            model_id=provider1,provider2
-        """
+    # -----------------------------------------------------
+    # Runtime compatibility properties
+    # -----------------------------------------------------
 
-        routes: dict[str, tuple[str, ...]] = {}
+    @property
+    def max_retries(self) -> int:
+        return self.runtime.max_retries
 
-        for definition in self.model_failover_routes.split(";"):
-            definition = definition.strip()
+    @property
+    def request_timeout_seconds(self) -> float:
+        return self.runtime.request_timeout_seconds
 
-            if not definition:
-                continue
+    @property
+    def max_connections(self) -> int:
+        return self.runtime.max_connections
 
-            model_id, separator, providers = definition.partition("=")
+    @property
+    def max_keepalive_connections(self) -> int:
+        return self.runtime.max_keepalive_connections
 
-            if not separator:
+    @property
+    def max_concurrency(self) -> int:
+        return self.runtime.max_concurrency
+
+    @property
+    def max_failover_attempts(self) -> int:
+        return self.runtime.max_failover_attempts
+
+    # -----------------------------------------------------
+    # Configuration validation
+    # -----------------------------------------------------
+
+    def validate_configuration(self) -> None:
+        """Validate relationships between providers, models, and routes."""
+
+        provider_names = self.providers
+
+        if not provider_names:
+            raise ValueError("At least one inference provider is required")
+
+        if len(provider_names) != len(set(provider_names)):
+            raise ValueError("Duplicate inference provider names")
+
+        model_ids = [model_id for model_id, _ in self.models]
+
+        if len(model_ids) != len(set(model_ids)):
+            raise ValueError("Duplicate model IDs")
+
+        registered_providers = set(provider_names)
+        registered_models = set(model_ids)
+
+        for model_id, provider_name in self.models:
+            if provider_name not in registered_providers:
                 raise ValueError(
-                    "Invalid model failover definition "
-                    f"'{definition}'; "
-                    "expected 'model_id=provider1,provider2'"
+                    f"Model '{model_id}' references unknown provider "
+                    f"'{provider_name}'"
                 )
 
-            model_id = model_id.strip()
-
-            if not model_id:
-                raise ValueError(
-                    "Model failover definition contains "
-                    "an empty model_id"
-                )
-
-            provider_names = tuple(
-                provider.strip()
-                for provider in providers.split(",")
-                if provider.strip()
+        if self.default_model not in registered_models:
+            raise ValueError(
+                f"Default model '{self.default_model}' is not registered"
             )
 
-            if not provider_names:
+        for model_id, providers in self.model_failover_providers.items():
+            if model_id not in registered_models:
                 raise ValueError(
-                    f"Model '{model_id}' has no providers"
+                    f"Failover route references unknown model '{model_id}'"
                 )
 
-            routes[model_id] = provider_names
+            if not providers:
+                raise ValueError(
+                    f"Failover route for '{model_id}' has no providers"
+                )
 
-        return routes
+            unknown = set(providers) - registered_providers
+            if unknown:
+                raise ValueError(
+                    f"Failover route for '{model_id}' references "
+                    f"unknown providers: {sorted(unknown)}"
+                )
+
+        if self.runtime.request_timeout_seconds <= 0:
+            raise ValueError("request_timeout_seconds must be positive")
+
+        if self.runtime.max_retries < 0:
+            raise ValueError("max_retries cannot be negative")
+
+        if self.runtime.max_connections <= 0:
+            raise ValueError("max_connections must be positive")
+
+        if self.runtime.max_keepalive_connections <= 0:
+            raise ValueError(
+                "max_keepalive_connections must be positive"
+            )
+
+        if (
+            self.runtime.max_keepalive_connections
+            > self.runtime.max_connections
+        ):
+            raise ValueError(
+                "max_keepalive_connections cannot exceed max_connections"
+            )
+
+    # -----------------------------------------------------
+    # Tenant model access
+    # -----------------------------------------------------
 
     @property
     def tenant_models(self) -> dict[str, frozenset[str]]:
@@ -352,4 +339,6 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return cached application settings."""
 
-    return Settings()
+    settings = Settings()
+    settings.validate_configuration()
+    return settings

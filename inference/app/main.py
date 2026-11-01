@@ -94,12 +94,22 @@ reliability = ReliabilityManager(
 # PROVIDERS
 # =========================================================
 
+provider_configs = settings.provider_backend_configs
+
 for provider_name in settings.providers:
+    provider_config = provider_configs[provider_name]
+
+    if provider_config["type"] != "openai-compatible":
+        raise ValueError(
+            f"Unsupported provider type '{provider_config['type']}' "
+            f"for provider '{provider_name}'"
+        )
+
     provider_registry.register(
         OpenAICompatibleProvider(
             provider_name=provider_name,
-            base_url=settings.backend_base_url,
-            api_key=settings.backend_api_key,
+            base_url=provider_config["base_url"],
+            api_key=provider_config["api_key"],
             timeout=settings.request_timeout_seconds,
             max_connections=settings.max_connections,
             max_keepalive_connections=(
@@ -110,7 +120,6 @@ for provider_name in settings.providers:
     )
 
     reliability.register(provider_name)
-
 
 # =========================================================
 # MODELS
