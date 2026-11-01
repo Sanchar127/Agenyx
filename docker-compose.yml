@@ -205,7 +205,7 @@ services:
   # ─────────────────────────────────────────────
   gateway:
     build:
-      context: ./internal/gateway
+      context: .
       dockerfile: Dockerfile
 
     container_name: agenyx-gateway
