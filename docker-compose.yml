@@ -230,6 +230,30 @@ services:
     restart: unless-stopped
 
 
+  # ─────────────────────────────────────────────
+  # Website - Agenyx marketing site and AI Playground
+  # ─────────────────────────────────────────────
+  website:
+    build:
+      context: ./website
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_AGENYX_API_URL: http://localhost:8080
+        NEXT_PUBLIC_SITE_URL: http://localhost:3000
+        NEXT_PUBLIC_GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+
+    container_name: agenyx-website
+
+    ports:
+      - "3000:3000"
+
+    depends_on:
+      - gateway
+
+    restart: unless-stopped
+
+
 volumes:
   valkey_data:
   postgres_data:
