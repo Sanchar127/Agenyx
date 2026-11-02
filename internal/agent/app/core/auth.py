@@ -59,7 +59,7 @@ def _hash_password(password: str, salt: str) -> str:
 
     derived_key = kdf.derive(password.encode("utf-8"))
 
-    return f"{salt}:${derived_key.hex()}"
+    return f"{salt}:{derived_key.hex()}"
 
 
 def _verify_password(password: str, stored_hash: str) -> bool:
