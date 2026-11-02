@@ -13,7 +13,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-ARG NEXT_PUBLIC_AGENYX_API_URL=http://localhost:8080
+ARG NEXT_PUBLIC_AGENYX_API_URL=https://localhost:8443
 ARG NEXT_PUBLIC_SITE_URL=http://localhost:3000
 ARG NEXT_PUBLIC_GITHUB_CLIENT_ID=
 ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID=

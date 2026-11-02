@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -175,7 +176,12 @@ func newGatewayServer(
 		agentUpstream = "http://agent:8000"
 	}
 
-	agentProxy := httputil.NewSingleHostReverseProxy(agentUpstream)
+	agentURL, err := url.Parse(agentUpstream)
+	if err != nil {
+		return nil, fmt.Errorf("parse AGENEYX_AGENT_URL %q: %w", agentUpstream, err)
+	}
+
+	agentProxy := httputil.NewSingleHostReverseProxy(agentURL)
 	mux.Handle("POST /auth/email/login", agentProxy)
 	mux.Handle("POST /auth/email/signup", agentProxy)
 
@@ -194,6 +200,7 @@ func newGatewayServer(
 
 	handler := chain(
 		mux,
+		corsMiddleware,
 		requestIDMiddleware,
 		securityHeadersMiddleware,
 		requestSizeMiddlewareWithLimit(gatewaySpec.Request.MaxBodyBytes),

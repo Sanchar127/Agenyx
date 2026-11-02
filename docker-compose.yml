@@ -212,11 +212,14 @@ services:
 
     depends_on:
       - valkey
+      - agent
 
     environment:
       AGENTYX_VALKEY_URL: redis://valkey:6379/0
       AGENEYX_API_KEY_PERMISSIONS: agents:run,tasks:read
       AGENEYX_API_KEY: ${AGENEYX_API_KEY:?AGENEYX_API_KEY must be set in .env}
+      AGENEYX_AGENT_URL: http://agent:8000
+      AGENEYX_CORS_ORIGIN: ${AGENEYX_CORS_ORIGIN:-http://localhost:3000}
 
     user: "1000:1000"
 
@@ -238,7 +241,7 @@ services:
       context: ./website
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_AGENYX_API_URL: http://localhost:8080
+        NEXT_PUBLIC_AGENYX_API_URL: https://localhost:8443
         NEXT_PUBLIC_SITE_URL: http://localhost:3000
         NEXT_PUBLIC_GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
         NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
