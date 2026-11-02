@@ -96,8 +96,7 @@ reliability = ReliabilityManager(
 
 provider_configs = settings.provider_backend_configs
 
-for provider_name in settings.providers:
-    provider_config = provider_configs[provider_name]
+for provider_name, provider_config in provider_configs.items():
 
     if provider_config["type"] != "openai-compatible":
         raise ValueError(
