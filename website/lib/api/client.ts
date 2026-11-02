@@ -80,6 +80,13 @@ async function request<T>(
   return payload as T;
 }
 
+export interface AuthTokens {
+  access_token?: string;
+  token_type?: string;
+  expires_in?: number;
+  [key: string]: unknown;
+}
+
 export const agentApi = {
   createExecution: (intent: string): Promise<AgentRunResponse> =>
     request<AgentRunResponse>('/v1/agent/run', {
@@ -91,4 +98,18 @@ export const agentApi = {
     request<AgentExecutionState>(
       `/v1/agent/runs/${encodeURIComponent(executionId)}`,
     ),
+};
+
+export const authApi = {
+  loginWithEmail: (email: string, password: string): Promise<AuthTokens> =>
+    request<AuthTokens>('/auth/email/login', {
+      method: 'POST',
+      body: { email, password },
+    }),
+
+  signupWithEmail: (email: string, password: string): Promise<AuthTokens> =>
+    request<AuthTokens>('/auth/email/signup', {
+      method: 'POST',
+      body: { email, password },
+    }),
 };

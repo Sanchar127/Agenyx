@@ -36,3 +36,15 @@ class AgentResponse(BaseModel):
     tool_calls: list[ToolCallResult] = Field(
         default_factory=list
     )
+
+
+class AuthTokenResponse(BaseModel):
+    """
+    Token issued for an authenticated email/password principal.
+    """
+
+    access_token: str
+
+    token_type: str = "bearer"
+
+    expires_in: int = 3600

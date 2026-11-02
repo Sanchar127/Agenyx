@@ -8,7 +8,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -168,6 +170,21 @@ func newGatewayServer(
 		mux.Handle("GET /v1/agent/runs/{execution_id}", orchestratorHandler)
 	}
 
+	// Auth routes forward credential exchanges to the agent service.
+	agentUpstream := os.Getenv("AGENEYX_AGENT_URL")
+	if agentUpstream == "" {
+		agentUpstream = "http://agent:8000"
+	}
+
+	agentURL, err := url.Parse(agentUpstream)
+	if err != nil {
+		return nil, fmt.Errorf("parse AGENEYX_AGENT_URL %q: %w", agentUpstream, err)
+	}
+
+	agentProxy := httputil.NewSingleHostReverseProxy(agentURL)
+	mux.Handle("POST /auth/email/login", agentProxy)
+	mux.Handle("POST /auth/email/signup", agentProxy)
+
 	// No reverse proxy: unsupported API routes return 404.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
@@ -183,6 +200,7 @@ func newGatewayServer(
 
 	handler := chain(
 		mux,
+		corsMiddleware,
 		requestIDMiddleware,
 		securityHeadersMiddleware,
 		requestSizeMiddlewareWithLimit(gatewaySpec.Request.MaxBodyBytes),

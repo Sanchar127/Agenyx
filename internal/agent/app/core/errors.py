@@ -183,3 +183,26 @@ class LLMResponseError(LLMError):
     """
     Raised when an LLM provider returns an invalid response.
     """
+
+
+# ============================================================
+# Authentication errors
+# ==========================================================
+
+
+class AuthenticationError(AgenyxError):
+    """
+    Base exception for authentication failures.
+    """
+
+
+class InvalidCredentialsError(AuthenticationError):
+    """
+    Raised when email/password credentials fail validation.
+    """
+
+
+class UserAlreadyExistsError(AuthenticationError):
+    """
+    Raised when a signup is attempted for an existing principal.
+    """
