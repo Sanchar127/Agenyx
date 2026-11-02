@@ -1,0 +1,68 @@
+---
+title: Deploy Locally
+description: Run Agenyx locally with a single command.
+---
+
+# Deploy Locally
+
+Run your own Agenyx instance locally using the Agenyx CLI.
+
+## Prerequisites
+
+- Docker Engine
+- Docker Compose
+- Git
+
+## Start Agenyx
+
+From the root of the Agenyx repository, run:
+
+```bash
+./agenyx serve
+```
+
+This command builds the required Docker images and starts the Agenyx services.
+
+> **Note:** The first startup may take several minutes because Docker needs to build the images.
+
+## Verify Running Containers
+
+Check that Agenyx containers are running:
+
+```bash
+docker ps
+```
+
+## Check Exposed Ports
+
+To see the ports mapped between your machine and the containers:
+
+```bash
+docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+```
+
+## View Logs
+
+View logs from a specific container:
+
+```bash
+docker logs -f <container_name>
+```
+
+For example:
+
+```bash
+docker logs -f agenyx-agent
+```
+
+To inspect recent logs:
+
+```bash
+docker logs --tail 100 <container_name>
+```
+
+## Stop Agenyx
+
+```bash
+docker stop $(docker ps -q --filter "name=agenyx")
+```
