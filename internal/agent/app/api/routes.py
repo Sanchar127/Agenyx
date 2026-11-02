@@ -8,8 +8,10 @@ from fastapi.responses import StreamingResponse
 from app.agent_runtime.runtime import AgentRuntime
 from app.agent_runtime.submission import ExecutionSubmission
 from app.api.streaming import event_stream_to_sse
-from app.models.requests import AgentRequest
-from app.models.responses import AgentResponse
+from app.core.auth import create_access_token, user_credential_store
+from app.core.errors import InvalidCredentialsError
+from app.models.requests import AgentRequest, EmailCredentialRequest
+from app.models.responses import AgentResponse, AuthTokenResponse
 
 
 def create_router(
@@ -21,6 +23,51 @@ def create_router(
     @router.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @router.post(
+        "/auth/email/signup",
+        response_model=AuthTokenResponse,
+    )
+    async def signup_email_credentials(
+        request: EmailCredentialRequest,
+    ) -> AuthTokenResponse:
+        subject = user_credential_store.add_user(
+            email=request.email,
+            password=request.password,
+        )
+
+        access_token = create_access_token(subject=subject)
+
+        return AuthTokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=3600,
+        )
+
+    @router.post(
+        "/auth/email/login",
+        response_model=AuthTokenResponse,
+    )
+    async def login_email_credentials(
+        request: EmailCredentialRequest,
+    ) -> AuthTokenResponse:
+        subject = user_credential_store.verify_user(
+            email=request.email,
+            password=request.password,
+        )
+
+        if subject is None:
+            raise InvalidCredentialsError(
+                "Invalid email or password.",
+            )
+
+        access_token = create_access_token(subject=subject)
+
+        return AuthTokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=3600,
+        )
 
     @router.post(
         "/v1/agent/run",

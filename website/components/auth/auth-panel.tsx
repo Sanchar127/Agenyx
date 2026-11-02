@@ -1,5 +1,7 @@
 import Link from 'next/link';
 
+import { CredentialsForm } from '@/components/auth/credentials-form';
+
 interface AuthPanelProps {
   mode: 'login' | 'signup';
   error?: string;
@@ -48,6 +50,8 @@ export function AuthPanel({ mode, error }: AuthPanelProps) {
               {errorMessage}
             </div>
           ) : null}
+
+          <CredentialsForm mode={isLogin ? 'login' : 'signup'} />
 
           <div className='mt-8 flex flex-col gap-3'>
             <Link

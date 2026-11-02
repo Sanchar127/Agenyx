@@ -4,9 +4,11 @@ from fastapi.responses import JSONResponse
 from app.core.errors import (
     AgentMaxStepsError,
     AgentProtocolError,
+    InvalidCredentialsError,
     LLMConnectionError,
     LLMTimeoutError,
     ToolError,
+    UserAlreadyExistsError,
 )
 
 
@@ -34,6 +36,14 @@ async def agenyx_error_handler(
     elif isinstance(exc, ToolError):
         status_code = 502
         error_code = "TOOL_ERROR"
+
+    elif isinstance(exc, UserAlreadyExistsError):
+        status_code = 409
+        error_code = "USER_ALREADY_EXISTS"
+
+    elif isinstance(exc, InvalidCredentialsError):
+        status_code = 401
+        error_code = "INVALID_CREDENTIALS"
 
     else:
         status_code = 500
