@@ -1,0 +1,78 @@
+---
+title: Semantic Router
+description: Model selection and semantic routing for inference requests.
+---
+
+# Semantic Router
+
+The Semantic Router is a Go service that selects the best model to serve an inference request. It evaluates enabled models against request constraints, applies scoring strategies, and accounts for session-level model affinity to avoid unnecessary switching.
+
+## Responsibilities
+
+- Filter candidate models by provider, model name, capabilities, and minimum context window.
+- Run scoring strategies to rank candidates.
+- Apply a scorer and session-affinity weight.
+- Prevent unnecessary model switching via a configurable switch threshold.
+- Maintain session state (turn count, model turns, switch count, last decision).
+
+## Routing Engine
+
+The router's `Engine` is stateless; mutable session state is externalized into a `SessionStore` (in-memory or Valkey-backed).
+
+### Routing Steps
+
+1. **Validate** the request (non-empty messages, each with a role).
+2. **Filter candidates** from the enabled model registry against request `constraints`.
+3. **Evaluate strategies** in order; the first strategy that returns results wins.
+4. **Score** each candidate through the optional `Scorer`, then add the session `AffinityWeight` if the candidate matches the session's current model.
+5. **Sort** candidates by score (descending), then priority (descending), then name (ascending).
+6. **Apply switch threshold**: if the session already has a current model and the top choice differs, the incumbent is retained unless the challenger's score exceeds `incumbent score + SwitchThreshold`.
+7. **Update session** atomically via compare-and-swap.
+
+## Request Constraints
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `required_capabilities` | `[]string` | Capabilities the selected model must support. |
+| `allowed_providers` | `[]string` | Restrict to these providers (case-insensitive). |
+| `allowed_models` | `[]string` | Restrict to these model names. |
+| `min_context_window` | `int` | Minimum context window the model must provide. |
+
+## Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Model identifier. |
+| `provider` | string | Inference provider serving the model. |
+| `capabilities` | `[]string` | Capabilities the model supports. |
+| `context_window` | int | Maximum context window size. |
+| `priority` | int | Tie-breaker priority (higher wins). |
+| `enabled` | bool | Whether the model is eligible for selection. |
+
+## Decision
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Selected model name. |
+| `provider` | string | Selected provider. |
+| `score` | float64 | Final score of the selected model. |
+| `strategy` | string | Name of the strategy that produced the result. |
+| `candidates` | `[]Candidate` | All considered candidates with scores. |
+
+## Session Affinity
+
+To avoid flickering between models mid-conversation, the router tracks each session's current model. A challenger must exceed the incumbent's score by the `SwitchThreshold` to displace it. The session store records:
+
+- `currentModel`, `turnCount`, `modelTurns` (per-model counts)
+- `switchCount`, `lastDecision`, `lastSeen`
+
+## Configuration
+
+| Setting | Meaning | Default |
+|---------|---------|---------|
+| `AffinityWeight` | Bonus added to the session's current model score | configurable |
+| `SwitchThreshold` | Score margin required to switch models | configurable |
+
+## Port
+
+The router service runs on port `8005` and is reachable at `http://router:8005` within Docker Compose.

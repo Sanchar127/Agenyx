@@ -1,0 +1,194 @@
+---
+title: API Reference
+description: HTTP API endpoint reference for the Agenyx gateway and inference service.
+---
+
+# API Reference
+
+This reference covers the HTTP APIs exposed by the Agenyx **API Gateway** and **Inference Service**.
+
+## Base URLs (Docker Compose)
+
+| Service | Base URL |
+|---------|----------|
+| Gateway | `https://localhost:8443` |
+| Inference | `http://localhost:8004` |
+
+## Authentication
+
+| Service | Header | Source |
+|---------|--------|--------|
+| Gateway | `Authorization: Bearer <AGENEYX_API_KEY>` | `AGENEYX_API_KEY` |
+| Inference | `X-Agenyx-Service-Key: <INFERENCE_SERVICE_API_KEY>` | `INFERENCE_SERVICE_API_KEY` |
+
+Gateway `/v1/` routes also require the corresponding permission (`agents:run` or `tasks:read`) configured in `AGENEYX_API_KEY_PERMISSIONS`.
+
+---
+
+## API Gateway
+
+### Health
+
+**`GET /health/live`**
+
+Liveness probe. Returns `200 {"status":"alive"}` if the gateway process is running.
+
+**`GET /health/ready`**
+
+Readiness probe. Returns `200 {"status":"ready"}` only when the Valkey queue responds to `PING`; otherwise `503`.
+
+**`GET /health`**
+
+Legacy health endpoint. Returns `200 {"status":"ok"}`.
+
+### Agent Execution
+
+**`POST /v1/agent/run`**
+
+Submit an agent execution. Requires `agents:run` permission.
+
+```http
+POST /v1/agent/run
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+
+{
+  "intent": "Summarize the quarterly sales data"
+}
+```
+
+Response (`202 Accepted`):
+
+```json
+{
+  "execution_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued"
+}
+```
+
+**`GET /v1/agent/runs/{execution_id}`**
+
+Read execution state and results. Requires `tasks:read` permission.
+
+Response (`200 OK`):
+
+```json
+{
+  "execution_id": "...",
+  "status": "completed",
+  "answer": "...",
+  "attempt": "1",
+  "worker": "...",
+  "duration_ms": "1240"
+}
+```
+
+Possible statuses: `queued`, `running`, `retrying`, `completed`, `failed`.
+
+### Authentication (proxied to Agent)
+
+**`POST /auth/email/login`** — proxied to `AGENEYX_AGENT_URL`
+**`POST /auth/email/signup`** — proxied to `AGENEYX_AGENT_URL`
+
+### Errors
+
+| Code | HTTP | Condition |
+|------|------|-----------|
+| `unauthorized` | `401` | Missing or invalid Bearer API key |
+| `forbidden` | `403` | Unknown route or missing permission |
+| `rate limit exceeded` | `429` | Per-IP token bucket exhausted |
+| `request body too large` | `413` | Body exceeds `maxBodyBytes` |
+| `method not allowed` | `405` | Wrong HTTP method |
+
+---
+
+## Inference Service
+
+### Models & Providers
+
+**`GET /v1/models`**
+
+List registered models.
+
+```json
+{
+  "object": "list",
+  "data": [
+    {"id": "qwen2.5:7b", "object": "model", "owned_by": "agenyx"}
+  ]
+}
+```
+
+**`GET /v1/providers`**
+
+List registered inference providers.
+
+### Chat Completions
+
+**`POST /v1/chat/completions`**
+
+OpenAI-compatible chat completion. Requires `X-Agenyx-Service-Key`.
+
+```http
+POST /v1/chat/completions
+X-Agenyx-Service-Key: <KEY>
+Content-Type: application/json
+
+{
+  "model": "qwen2.5:7b",
+  "messages": [{"role": "user", "content": "Hello!"}]
+}
+```
+
+Response:
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "created": 1700000000,
+  "model": "qwen2.5:7b",
+  "choices": [
+    {"index": 0, "message": {"role": "assistant", "content": "Hi there!"}, "finish_reason": "stop"}
+  ]
+}
+```
+
+Response headers: `X-Agenyx-Provider`, `X-Agenyx-Model`.
+
+**`GET /v1/reliability`**
+
+Return provider reliability / circuit-breaker state.
+
+### Health & Metrics
+
+**`GET /health`** — liveness: `{"status":"ok"}`
+
+**`GET /ready`** — readiness: `{"status":"ready","provider":"..."}` or `503`
+
+**`GET /metrics`** — Prometheus metrics
+
+### Error Codes
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `INVALID_JSON` | `400` | Body is not valid JSON |
+| `INVALID_MESSAGES` | `400` | `messages` missing or empty |
+| `MODEL_NOT_FOUND` | `404` | Model not registered |
+| `STREAMING_NOT_IMPLEMENTED` | `501` | `"stream": true` not supported |
+| `INFERENCE_CONCURRENCY_LIMIT` | `429` | Concurrency limit reached |
+| `MODEL_UNAVAILABLE` | `503` | No failover route for model |
+| `INFERENCE_FAILED` | `503` | All failover providers exhausted |
+| `INTERNAL_SERVER_ERROR` | `500` | Unexpected error |
+
+### Example: Send a Request
+
+```bash
+curl http://localhost:8004/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "X-Agenyx-Service-Key: dev-secret" \
+  -d '{
+        "model": "qwen2.5:7b",
+        "messages": [{"role": "user", "content": "Hello!"}]
+      }'
+```

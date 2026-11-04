@@ -1,0 +1,110 @@
+---
+title: API Gateway
+description: The Agenyx API gateway — authentication, rate limiting, routing, and health.
+---
+
+# API Gateway
+
+The API Gateway is the entry point to the Agenyx platform. Implemented in Go, it terminates TLS, enforces authentication and authorization, rate limits callers, and routes execution requests to the orchestrator. It also proxies authentication flows to the Agent service.
+
+## Responsibilities
+
+- **TLS termination** — serves HTTPS on `:443` with an HTTP `:80` → HTTPS redirect.
+- **Authentication** — validates a Bearer API key (`AGENEYX_API_KEY`) on `/v1/` routes.
+- **Authorization** — enforces permissions (`agents:run`, `tasks:read`) per route shape.
+- **Rate limiting** — per-client-IP token bucket (configurable requests/second and burst).
+- **Request hygiene** — CORS, security headers, request ID, request size limit, structured access logging.
+- **Routing** — executes agent runs via the orchestrator; proxies `/auth/email/*` to the Agent service; returns 404 for everything else.
+- **Health** — liveness, readiness, and legacy `/health` endpoints.
+
+## Endpoints
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/health/live` | Liveness probe (gateway process alive) | No |
+| GET | `/health/ready` | Readiness probe (Valkey queue reachable) | No |
+| GET | `/health/orchestrator` | Alias for readiness | No |
+| GET | `/health/upstream` | Alias for readiness | No |
+| GET | `/health` | Legacy health shape (`{"status":"ok"}`) | No |
+| POST | `/v1/agent/run` | Submit an agent execution (returns `execution_id`) | Yes (`agents:run`) |
+| GET | `/v1/agent/runs/{execution_id}` | Read execution state and results | Yes (`tasks:read`) |
+| POST | `/auth/email/login` | Proxied to Agent service (`AGENEYX_AGENT_URL`) | No |
+| POST | `/auth/email/signup` | Proxied to Agent service (`AGENEYX_AGENT_URL`) | No |
+
+> **Note:** Health endpoints are intentionally unauthenticated so load balancers and Kubernetes probes can reach them.
+
+## Middleware Chain
+
+Handlers are wrapped in the following order (outermost first):
+
+1. `corsMiddleware` — CORS headers and preflight (`OPTIONS`) handling. Placed first so preflights bypass auth/rate limiting and headers are committed on every response.
+2. `requestIDMiddleware` — generates and echoes an `X-Request-ID` header.
+3. `securityHeadersMiddleware` — sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`.
+4. `requestSizeMiddleware` — caps request body size (from the gateway recipe, default 1 MiB).
+5. `accessLogMiddleware` — structured JSON access log (timing, status, bytes, client IP, request ID).
+6. `RateLimiter` — token-bucket rate limiter keyed by client IP (trusted-proxy aware).
+7. `apiKeyAuthMiddleware` — Bearer token comparison for `/v1/` routes.
+8. `authorizationMiddleware` — permission enforcement for `/v1/` routes.
+
+## Authentication & Permissions
+
+The gateway requires `AGENEYX_API_KEY` to be set. Clients present it as:
+
+```http
+Authorization: Bearer <AGENEYX_API_KEY>
+```
+
+Permissions are configured via `AGENEYX_API_KEY_PERMISSIONS` as a comma-separated list. Supported permissions:
+
+| Permission | Allows |
+|------------|--------|
+| `agents:run` | `POST /v1/agent/run` (and related submit/stream shapes) |
+| `tasks:read` | `GET /v1/agent/runs/{id}` and `GET /v1/agent/{id}/events` |
+
+At least one permission must be configured. Unknown routes/methods under `/v1/` are denied with `403 Forbidden`.
+
+## Rate Limiting
+
+Rate limiting uses a token-bucket algorithm keyed by resolved client IP (respects `AGENEYX_TRUSTED_PROXIES` for `X-Forwarded-For`). It is configured through the gateway recipe:
+
+| Recipe Field | Meaning | Default |
+|--------------|---------|---------|
+| `rateLimit.requestsPerSecond` | Token refill rate | `10` |
+| `rateLimit.burst` | Bucket capacity | `20` |
+
+When a client exceeds its bucket, the gateway responds `429 Too Many Requests` with a `Retry-After: 1` header.
+
+## Recipe Configuration
+
+The gateway loads a YAML recipe (`AGENEYX_GATEWAY_RECIPE`, default `recipes/gateway/default.yaml`):
+
+```yaml
+apiVersion: agenyx.ai/v1alpha1
+kind: GatewayRecipe
+metadata:
+  name: default-gateway
+  version: "1.0.0"
+spec:
+  rateLimit:
+    requestsPerSecond: 10
+    burst: 20
+  request:
+    maxBodyBytes: 1048576
+```
+
+## Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `AGENEYX_API_KEY` | Required Bearer API key | (required) |
+| `AGENEYX_API_KEY_PERMISSIONS` | Comma-separated permissions | (required, ≥1) |
+| `AGENEYX_GATEWAY_RECIPE` | Path to gateway recipe YAML | `recipes/gateway/default.yaml` |
+| `AGENEYX_AGENT_URL` | Agent upstream for `/auth/email/*` proxy | `http://agent:8000` |
+| `AGENEYX_TRUSTED_PROXIES` | Trusted CIDRs for client IP resolution | (none) |
+| `AGENEYX_CORS_ORIGIN` | Allowed CORS origin (`*` for any) | (none — no CORS headers) |
+| `AGENEYX_CORS_ALLOW_CREDENTIALS` | Enable `Access-Control-Allow-Credentials` | `false` |
+
+## Health
+
+- `/health/live` — returns `200 {"status":"alive"}` if the Go gateway process is running.
+- `/health/ready` — returns `200 {"status":"ready"}` only when the orchestrator's Valkey queue responds to `PING` within 2 seconds; otherwise `503`.

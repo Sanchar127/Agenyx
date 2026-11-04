@@ -1,0 +1,91 @@
+---
+title: Orchestrator
+description: Execution orchestration and task queuing for agent runs.
+---
+
+# Orchestrator
+
+The Orchestrator manages the lifecycle of agent executions. It receives an intent, persists it to a Valkey-backed task queue, and hands it off to a task worker for asynchronous processing. It is the bridge between the synchronous gateway API and the asynchronous execution plane.
+
+## Responsibilities
+
+- Accept an execution `intent` and assign a UUID `execution_id`.
+- Submit the task to a Valkey stream for a worker to consume.
+- Store and retrieve execution state (queued → running → completed/retrying/failed).
+- Expose readiness by pinging the underlying queue.
+
+## API
+
+The orchestrator is exposed through the gateway via these routes:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/agent/run` | Submit an execution; returns `202 Accepted` with `execution_id` and `status: "queued"` |
+| GET | `/v1/agent/runs/{execution_id}` | Read execution state and results |
+
+### Submit an Execution
+
+**Request**
+
+```json
+POST /v1/agent/run
+Content-Type: application/json
+
+{
+  "intent": "Summarize the quarterly sales data and draft a follow-up email"
+}
+```
+
+**Response** (`202 Accepted`)
+
+```json
+{
+  "execution_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued"
+}
+```
+
+### Read Execution State
+
+**Response** (`200 OK`)
+
+```json
+{
+  "execution_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "answer": "...",
+  "attempt": "1",
+  "worker": "agenyx-go-worker",
+  "started_at": "...",
+  "completed_at": "...",
+  "duration_ms": "1240",
+  "tool_calls": "[...]"
+}
+```
+
+Possible `status` values: `queued`, `running`, `retrying`, `completed`, `failed`.
+
+## Execution States
+
+| State | Meaning |
+|-------|---------|
+| `queued` | Task accepted and waiting in the Valkey stream. |
+| `running` | A worker has picked up the task and is executing it. |
+| `retrying` | The task failed and is waiting for its next retry attempt. |
+| `completed` | Execution finished successfully; result stored. |
+| `failed` | Exhausted all retry attempts; dead-lettered. |
+
+Execution state is stored in Valkey under `agenyx:execution:{execution_id}` as a hash.
+
+## Errors
+
+| Error | HTTP Code | Condition |
+|-------|-----------|-----------|
+| `ErrInvalidIntent` | `422 Unprocessable Entity` | Intent is empty or whitespace. |
+| `ErrQueueUnavailable` | `503 Service Unavailable` | Valkey queue cannot be reached. |
+| `ErrExecutionNotFound` | `404 Not Found` | No state exists for the execution ID. |
+| `ErrStateUnavailable` | `503 Service Unavailable` | State store read failed. |
+
+## Queue
+
+The orchestrator uses a `Queue` interface (`Submit`, `GetExecution`) backed by Valkey. The concrete implementation shares the task stream and execution-state keys with the task worker. The gateway's readiness probe (`/health/ready`) verifies the queue is reachable before reporting the service as ready.
