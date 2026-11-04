@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { redirect } from 'next/navigation';
+import { randomUUID } from 'crypto';
 
 import { AGENYX_API_BASE_URL } from '@/lib/api/client';
+import { setSessionCookie } from '@/lib/auth/session';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -20,12 +21,10 @@ export async function GET(request: Request) {
 
   cookieStore.delete('agenyx_oauth_state');
 
-  // The token exchange itself is performed by the Agenyx backend.
-  // The frontend hands the authorization code to the backend, which is
-  // the next backend capability required by the OAuth integration.
   const tokenEndpoint = `${AGENYX_API_BASE_URL}/auth/github/token`;
 
   let exchangeFailed = true;
+  let responseBody: unknown = null;
 
   try {
     const exchangeResponse = await fetch(tokenEndpoint, {
@@ -34,10 +33,17 @@ export async function GET(request: Request) {
       body: JSON.stringify({
         code,
         client_id: process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID,
+        redirect_uri: `${process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'}/auth/github/callback`,
       }),
     });
 
     exchangeFailed = !exchangeResponse.ok;
+
+    try {
+      responseBody = await exchangeResponse.json();
+    } catch {
+      responseBody = null;
+    }
   } catch {
     exchangeFailed = true;
   }
@@ -51,5 +57,22 @@ export async function GET(request: Request) {
     return NextResponse.redirect(redirectUrl);
   }
 
-  return NextResponse.redirect(redirectUrl);
+  // On successful token exchange, create a response that sets the session
+  // cookie and redirects to the playground.
+  const secure = process.env.NODE_ENV === 'production';
+  const sessionToken = randomUUID();
+
+  const nextResponse = NextResponse.redirect(new URL('/playground', request.url));
+  setSessionCookie(nextResponse, sessionToken, secure);
+
+  // Also set the cookie via the cookieStore for Next.js to pick up.
+  cookieStore.set('agenyx_session', sessionToken, {
+    httpOnly: true,
+    secure,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 60 * 60 * 24, // 24 hours
+  });
+
+  return nextResponse;
 }
