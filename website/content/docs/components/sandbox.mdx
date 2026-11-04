@@ -1,0 +1,103 @@
+---
+title: Sandbox
+description: Isolated tool execution — objective, gVisor hardening, resource limits, and lifecycle.
+---
+
+# Sandbox
+
+## Objective
+
+The Sandbox's objective is to **provide isolated, secure execution of agent tools** — running untrusted tool code in gVisor containers with strict resource limits so that agents can safely execute tools without compromising the host.
+
+## What It Does
+
+- Receives tool execution requests from the Agent service.
+- Runs each execution in an isolated sandbox with a strict security profile.
+- Enforces resource limits (memory, CPU, PIDs, filesystem).
+- Reports execution state transitions and results.
+
+## Security Architecture
+
+```mermaid
+graph TB
+    Agent((Agent Service)) -->|Tool Request| SB[Sandbox Service<br/>Go, :9000]
+
+    subgraph Container [gVisor Container<br/>runsc runtime]
+        Runtime[runsc<br/>user-space kernel]
+        FS[Root Filesystem<br/>read_only: true]
+        Caps[Capabilities<br/>cap_drop: ALL]
+        Priv[Privileges<br/>no-new-privileges: true]
+        Mem[Memory<br/>256m limit]
+        CPU[CPU<br/>0.5 core limit]
+        PID[PIDs<br/>64 limit]
+        Tmp[Tmpfs<br/>/tmp: 16m, mode 1777]
+        Net[NetworkPolicy<br/>restricted egress/ingress]
+    end
+
+    SB --> Runtime
+    Runtime --> FS
+    Runtime --> Caps
+    Runtime --> Priv
+    Runtime --> Mem
+    Runtime --> CPU
+    Runtime --> PID
+    Runtime --> Tmp
+    Runtime --> Net
+
+    classDef sec fill:#e1f5fe,stroke:#01579b;
+    classDef ctrl fill:#fff3e0,stroke:#e65100;
+
+    class SB sec;
+    class Runtime,FS,Caps,Priv,Mem,CPU,PID,Tmp,Net ctrl;
+```
+
+## Security Hardening
+
+| Control | Setting | Purpose |
+|---------|---------|---------|
+| Runtime | `runsc` (gVisor) | Kernel-level isolation via user-space kernel |
+| Root filesystem | `read_only: true` | Prevent writes to the container image |
+| Capabilities | `cap_drop: [ALL]` | Drop all Linux capabilities |
+| Privileges | `no-new-privileges: true` | Prevent gaining new privileges |
+| Memory | `256m` | Cap RAM usage |
+| CPU | `0.5` | Limit to half a CPU core |
+| PIDs | `64` | Limit process/thread count |
+| Tmpfs | `/tmp:size=16m,mode=1777` | Small writable tmp directory |
+| Network | NetworkPolicy | Restricted egress/ingress |
+
+## Sandbox Lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> Requested
+    Requested --> Running : Provisioned
+    Running --> Completed : Execution succeeds
+    Running --> Failed : Execution fails
+    Completed --> [*]
+    Failed --> [*]
+```
+
+| State | Meaning |
+|-------|---------|
+| `Requested` | Sandbox creation requested but not yet provisioned. |
+| `Running` | Sandbox is active and accepting executions. |
+| `Completed` | Execution finished successfully. |
+| `Failed` | Execution failed; reason recorded. |
+
+## Domain Model
+
+| Concept | Description |
+|---------|-------------|
+| `SandboxSpec` | The desired configuration (resources, network policy, filesystem policy). |
+| `SandboxState` | Current lifecycle state of a sandbox. |
+| `Execution` | A single tool execution with input, output, and result. |
+| `ExecutionResult` | Outcome of an execution (success/failure, output, error). |
+| `ResourceLimits` | CPU, memory, PID, and filesystem constraints. |
+| `NetworkPolicy` | Allowed/denied network destinations. |
+| `FilesystemPolicy` | Allowed/denied filesystem paths and operations. |
+
+## Port
+
+The sandbox service runs on port `9000` and is reachable at `http://sandbox:9000` within Docker Compose.
+
+> **Note:** The sandbox requires gVisor (`runsc`) installed on the host. See `scripts/setup-gvisor.sh` for host setup.

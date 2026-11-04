@@ -1,0 +1,76 @@
+---
+title: MCP Gateway
+description: Model Context Protocol gateway — objective, connecting agents to external MCP servers.
+---
+
+# MCP Gateway
+
+## Objective
+
+The MCP Gateway's objective is to **enable Agenyx agents to discover and invoke tools exposed by external Model Context Protocol (MCP) servers** — extending the agent's built-in tool set with capabilities from databases, file systems, APIs, and other MCP-compliant services.
+
+## What It Does
+
+- Discovers tools and resources exposed by MCP servers.
+- Routes agent tool calls to the appropriate MCP server.
+- Manages MCP client sessions and protocol framing.
+- Authenticates MCP connections via `AGENEYX_MCP_GATEWAY_TOKEN`.
+
+## Architecture
+
+```mermaid
+graph TB
+    Agent((Agent Service)) -->|Tool Request| MCP[MCP Gateway<br/>Go, embedded in Agent]
+
+    subgraph MCPGateway [MCP Gateway]
+        Discover[Tool Discovery<br/>list MCP server capabilities]
+        Route[Tool Routing<br/>direct calls to correct server]
+        Session[Session Management<br/>MCP client sessions]
+        Auth[Authentication<br/>AGENEYX_MCP_GATEWAY_TOKEN]
+    end
+
+    MCP --> Discover
+    MCP --> Route
+    MCP --> Session
+    MCP --> Auth
+
+    subgraph External [External MCP Servers]
+        DB[(Database MCP Server)]
+        FS[(File System MCP Server)]
+        API[(API MCP Server)]
+    end
+
+    Route --> DB
+    Route --> FS
+    Route --> API
+
+    classDef proc fill:#e1f5fe,stroke:#01579b;
+    classDef ext fill:#fff3e0,stroke:#e65100;
+
+    class Discover,Route,Session,Auth proc;
+    class DB,FS,API ext;
+```
+
+## Configuration
+
+The MCP Gateway is configured through a gateway recipe (`recipes/mcp-gateway/default.yaml`):
+
+```yaml
+apiVersion: agenyx.ai/v1alpha1
+kind: GatewayRecipe
+metadata:
+  name: mcp-gateway
+spec:
+  # MCP server endpoints and tool mappings
+```
+
+The token `AGENEYX_MCP_GATEWAY_TOKEN` must be set in the environment for the Agent service to authenticate with the MCP Gateway.
+
+## Integration
+
+The Agent service uses the MCP Gateway to extend its built-in tool set with capabilities exposed by external MCP servers (databases, file systems, APIs, etc.).
+
+## Related
+
+- [Agent Service](./agent.mdx) — consumes MCP Gateway tools.
+- [API Gateway](./gateway.mdx) — ingress and auth for MCP routes.

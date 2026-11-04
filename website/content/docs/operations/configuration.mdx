@@ -1,9 +1,15 @@
 ---
 title: Configuration
-description: Environment variables and configuration reference for Agenyx subsystems.
+description: Environment variables and configuration reference for all Agenyx subsystems.
 ---
 
 # Configuration
+
+## Objective
+
+The configuration subsystem's objective is to **provide a centralized, environment-driven way to configure every Agenyx subsystem** — with clear defaults, required variables, and validation at startup.
+
+## What It Does
 
 Agenyx subsystems are configured through environment variables and, for some services, YAML recipe/config files. Environment variables generally take precedence over file-based config.
 
@@ -58,7 +64,7 @@ Configuration is loaded from `config/inference.yaml`, with `INFERENCE_`-prefixed
 | `INFERENCE_OPENAI_API_KEY` | OpenAI-compatible provider API key |
 | `INFERENCE_OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP trace endpoint |
 
-### Runtime Settings (`config/inference.yaml` → `runtime`)
+### Runtime Settings
 
 | Setting | Default | Description |
 |---------|---------|-------------|

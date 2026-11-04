@@ -1,15 +1,15 @@
 ---
-title: System Overview
-description: High-level architecture and subsystem map of the Agenyx AI agent runtime.
+title: Overview
+description: High-level system architecture, subsystem map, and request lifecycle of the Agenyx AI agent runtime.
 ---
 
-# System Overview
+# Overview
 
 **Agenyx** is a runtime for building, deploying, and running AI agents. It brings together AI agent orchestration, model inference, tool execution, and asynchronous task processing in one deployable platform.
 
 Agenyx is designed to make it easier to run and manage AI agents using configurable models and isolated execution environments. The platform is implemented in **Go** (control plane: gateway, orchestrator, router, sandbox daemon, CLI) and **Python** (data plane: agent service, inference gateway, task worker).
 
-## Architecture Principles
+## Design Principles
 
 | Principle | Description |
 |-----------|-------------|
@@ -40,17 +40,96 @@ Agenyx is designed to make it easier to run and manage AI agents using configura
 | **Valkey** | Task streams, execution state, rate-limiter buckets, router session state |
 | **PostgreSQL** | Durable agent execution storage (via the Agent service) |
 
+## System Architecture
+
+```mermaid
+graph TB
+    Client((Client)) -->|HTTPS :443| Gateway[API Gateway<br/>Go]
+
+    subgraph ControlPlane [Control Plane - Go]
+        Gateway
+        Orchestrator[Orchestrator<br/>Execution & Queue]
+        Router[Semantic Router<br/>Model Selection]
+        Sandbox[Sandbox<br/>Isolated Execution]
+    end
+
+    subgraph DataPlane [Data Plane - Python]
+        Agent[Agent Service<br/>LLM Reasoning]
+        Inference[Inference Service<br/>LLM Gateway]
+        Worker[Task Worker<br/>Execution & Retry]
+    end
+
+    subgraph Storage [Storage]
+        Valkey[(Valkey<br/>Task Streams & State)]
+        Postgres[(PostgreSQL<br/>Agent Execution Store)]
+    end
+
+    Gateway -->|Submit execution| Orchestrator
+    Orchestrator -->|Queue task| Valkey
+    Valkey -->|Consume| Worker
+    Worker -->|Call agent| Agent
+    Agent -->|Select model| Router
+    Agent -->|Call LLM| Inference
+    Agent -->|Run tools| Sandbox
+    Worker -->|Save state| Valkey
+    Agent -->|Persist| Postgres
+    Worker -->|Read state| Valkey
+
+    Client -.->|Poll results| Gateway
+
+    classDef control fill:#e1f5fe,stroke:#01579b;
+    classDef data fill:#fff3e0,stroke:#e65100;
+    classDef storage fill:#f3e5f5,stroke:#4a148c;
+
+    class Gateway,Orchestrator,Router,Sandbox control;
+    class Agent,Inference,Worker data;
+    class Valkey,Postgres storage;
+```
+
 ## Request Lifecycle
 
 A typical agent execution flows through the platform like this:
 
-1. **Client → Gateway**: An authenticated caller POSTs `{"intent": "..."}` to `POST /v1/agent/run` on the gateway (API key + permissions + rate limit enforced).
-2. **Gateway → Orchestrator**: The gateway routes the request to the orchestrator, which creates an execution ID and submits the task to a Valkey stream.
-3. **Orchestrator → Client**: Returns `202 Accepted` with the `execution_id` and `status: "queued"`.
-4. **Worker → Valkey**: A task worker consumes the message from the stream, marks execution `running`, and calls the Agent service.
-5. **Agent → Router → Inference → Sandbox**: The Agent reasons over the intent, selects a model via the Router, calls Inference, and may execute tools in the Sandbox.
-6. **Worker → Valkey**: The worker records the final execution state (`completed`, `retrying`, or `failed`) and acknowledges the message. Failed tasks retry with exponential backoff and are dead-lettered after max attempts.
-7. **Client → Gateway**: The caller polls `GET /v1/agent/runs/{execution_id}` to read execution state and results.
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as API Gateway
+    participant O as Orchestrator
+    participant V as Valkey
+    participant W as Task Worker
+    participant A as Agent Service
+    participant R as Semantic Router
+    participant I as Inference Service
+    participant S as Sandbox
+
+    C->>G: POST /v1/agent/run {intent} + API Key
+    G->>G: Auth + Rate Limit + CORS
+    G->>O: Submit execution
+    O->>O: Generate execution_id
+    O->>V: XADD stream {execution_id, intent}
+    O-->>C: 202 Accepted {execution_id, status: queued}
+
+    loop Poll for results
+        C->>G: GET /v1/agent/runs/{id}
+        G->>O: Get execution state
+        O->>V: HGETALL execution:{id}
+        O-->>G: State + result
+        G-->>C: 200 {status, answer}
+    end
+
+    V->>W: XREADGROUP consume task
+    W->>V: HSET execution:{id} status=running
+    W->>A: POST /v1/agent/run {intent}
+    A->>R: Route model selection
+    R-->>A: Selected model + provider
+    A->>I: POST /v1/chat/completions
+    I-->>A: LLM response
+    A->>S: Execute tools (if needed)
+    S-->>A: Tool results
+    A-->>W: {answer, steps, tool_calls}
+    W->>V: HSET execution:{id} status=completed + result
+    W->>V: XACK message
+```
 
 > **Note:** Streaming responses (`"stream": true`) are not yet implemented in the Inference service and return `501 Not Implemented`.
 

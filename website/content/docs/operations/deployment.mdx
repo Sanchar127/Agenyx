@@ -1,15 +1,51 @@
 ---
 title: Deployment
-description: Deploying Agenyx with Docker Compose and Kubernetes.
+description: Deploying Agenyx with Docker Compose and Kubernetes — services, ports, and configuration.
 ---
 
 # Deployment
 
-Agenyx can be deployed with **Docker Compose** (single-host, development-friendly) or **Kubernetes** (production-grade, via Kustomize). The platform is orchestrated by the `agenyx serve` CLI command, which validates and brings up all containers.
+## Objective
+
+The deployment subsystem's objective is to **provide a reliable, reproducible way to run the complete Agenyx platform** — from single-host Docker Compose for development to production-grade Kubernetes with Kustomize.
 
 ## Docker Compose
 
 The full stack is defined in `docker-compose.yml` at the repository root.
+
+### Service Architecture
+
+```mermaid
+graph TB
+    subgraph Compose [Docker Compose Stack]
+        GW[Gateway<br/>:8443 / :8080]
+        AG[Agent<br/>:8000]
+        INF[Inference<br/>:8004]
+        RT[Router<br/>:8005]
+        SB[Sandbox<br/>:9000]
+        WK[Worker<br/>background]
+        VK[Valkey<br/>task queue]
+        PG[PostgreSQL<br/>agent store]
+        WS[Website<br/>:3000]
+    end
+
+    GW --> VK
+    GW --> AG
+    AG --> PG
+    AG --> VK
+    AG --> INF
+    AG --> RT
+    AG --> SB
+    WK --> VK
+    WK --> AG
+    WS --> GW
+
+    classDef svc fill:#e1f5fe,stroke:#01579b;
+    classDef store fill:#f3e5f5,stroke:#4a148c;
+
+    class GW,AG,INF,RT,SB,WK,WS svc;
+    class VK,PG store;
+```
 
 ### Services
 

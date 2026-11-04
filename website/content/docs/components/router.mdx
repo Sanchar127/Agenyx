@@ -1,0 +1,125 @@
+---
+title: Semantic Router
+description: Model selection engine — objective, scoring strategies, session affinity, and routing decision flow.
+---
+
+# Semantic Router
+
+## Objective
+
+The Semantic Router's objective is to **select the best model to serve each inference request** — evaluating candidates against constraints, applying scoring strategies, and managing session-level model affinity to avoid unnecessary model switching mid-conversation.
+
+## What It Does
+
+- Filters candidate models by provider, model name, capabilities, and minimum context window.
+- Runs scoring strategies to rank candidates.
+- Applies a scorer and session-affinity weight.
+- Prevents unnecessary model switching via a configurable switch threshold.
+- Maintains session state (turn count, model turns, switch count, last decision).
+
+## Architecture
+
+```mermaid
+graph TB
+    Client((Client)) -->|Route Request| REQ[Request<br/>messages + constraints]
+
+    subgraph RouterEngine [Router Engine - Go]
+        FILTER[Filter Candidates<br/>provider / model / capabilities / context]
+        EVAL[Evaluate Strategies<br/>first strategy with results wins]
+        SCORE[Apply Scorer +<br/>Session Affinity Weight]
+        SORT[Sort by score → priority → name]
+        SWITCH[Switch Threshold<br/>retain incumbent unless<br/>challenger exceeds margin]
+        UPDATE[Update Session<br/>compare-and-swap]
+    end
+
+    subgraph Models [Model Registry]
+        M1[Model A<br/>enabled, priority 10]
+        M2[Model B<br/>enabled, priority 5]
+        M3[Model C<br/>disabled]
+    end
+
+    subgraph Store [Session Store<br/>Valkey / In-Memory]
+        SS[Session State<br/>turns, model turns,<br/>switch count, last decision]
+    end
+
+    REQ --> FILTER
+    FILTER -->|Candidates| EVAL
+    EVAL -->|Results| SCORE
+    SCORE -->|Scored| SORT
+    SORT -->|Sorted| SWITCH
+    SWITCH -->|Decision| UPDATE
+    UPDATE --> SS
+    MODELS[Enabled Models] --> FILTER
+    SS -->|Current model affinity| SCORE
+
+    SWITCH -->|Decision| Decision[Decision<br/>model / provider / score / strategy]
+
+    classDef proc fill:#e1f5fe,stroke:#01579b;
+    classDef store fill:#f3e5f5,stroke:#4a148c;
+
+    class FILTER,EVAL,SCORE,SORT,SWITCH,UPDATE proc;
+    class SS store;
+```
+
+## Request Constraints
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `required_capabilities` | `[]string` | Capabilities the selected model must support. |
+| `allowed_providers` | `[]string` | Restrict to these providers (case-insensitive). |
+| `allowed_models` | `[]string` | Restrict to these model names. |
+| `min_context_window` | `int` | Minimum context window the model must provide. |
+
+## Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Model identifier. |
+| `provider` | string | Inference provider serving the model. |
+| `capabilities` | `[]string` | Capabilities the model supports. |
+| `context_window` | int | Maximum context window size. |
+| `priority` | int | Tie-breaker priority (higher wins). |
+| `enabled` | bool | Whether the model is eligible for selection. |
+
+## Decision
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Selected model name. |
+| `provider` | string | Selected provider. |
+| `score` | float64 | Final score of the selected model. |
+| `strategy` | string | Name of the strategy that produced the result. |
+| `candidates` | `[]Candidate` | All considered candidates with scores. |
+
+## Session Affinity
+
+To avoid flickering between models mid-conversation, the router tracks each session's current model. A challenger must exceed the incumbent's score by the `SwitchThreshold` to displace it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoSession
+    NoSession --> HasSession : First request with session_id
+    HasSession --> HasSession : Subsequent request<br/>incumbent model retained unless<br/>challenger score > incumbent + threshold
+    HasSession --> NoSession : Session expires / cleared
+
+    note right of HasSession
+        Session tracks:
+        • currentModel
+        • turnCount
+        • modelTurns (per model)
+        • switchCount
+        • lastDecision
+        • lastSeen
+    end note
+```
+
+## Configuration
+
+| Setting | Meaning | Default |
+|---------|---------|---------|
+| `AffinityWeight` | Bonus added to the session's current model score | configurable |
+| `SwitchThreshold` | Score margin required to switch models | configurable |
+
+## Port
+
+The router service runs on port `8005` and is reachable at `http://router:8005` within Docker Compose.

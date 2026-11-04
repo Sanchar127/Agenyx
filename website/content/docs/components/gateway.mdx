@@ -1,13 +1,15 @@
 ---
 title: API Gateway
-description: The Agenyx API gateway — authentication, rate limiting, routing, and health.
+description: Secure ingress to the Agenyx platform — authentication, authorization, rate limiting, routing, and health.
 ---
 
 # API Gateway
 
-The API Gateway is the entry point to the Agenyx platform. Implemented in Go, it terminates TLS, enforces authentication and authorization, rate limits callers, and routes execution requests to the orchestrator. It also proxies authentication flows to the Agent service.
+## Objective
 
-## Responsibilities
+The API Gateway is the secure entry point to the Agenyx platform. Its objective is to **protect and route all inbound traffic** — enforcing authentication, authorization, rate limiting, and CORS — before forwarding execution requests to the orchestrator or proxying authentication flows to the Agent service.
+
+## What It Does
 
 - **TLS termination** — serves HTTPS on `:443` with an HTTP `:80` → HTTPS redirect.
 - **Authentication** — validates a Bearer API key (`AGENEYX_API_KEY`) on `/v1/` routes.
@@ -16,6 +18,54 @@ The API Gateway is the entry point to the Agenyx platform. Implemented in Go, it
 - **Request hygiene** — CORS, security headers, request ID, request size limit, structured access logging.
 - **Routing** — executes agent runs via the orchestrator; proxies `/auth/email/*` to the Agent service; returns 404 for everything else.
 - **Health** — liveness, readiness, and legacy `/health` endpoints.
+
+## Architecture
+
+```mermaid
+graph TB
+    Client((Client)) -->|TLS :443| GW[API Gateway]
+
+    subgraph MiddlewareChain [Middleware Chain]
+        CORS[CORS Middleware]
+        ReqID[Request ID Middleware]
+        SecHdr[Security Headers]
+        Size[Request Size Limit]
+        AccessLog[Access Log]
+        RateLimit[Rate Limiter<br/>Token Bucket]
+        APIKey[API Key Auth]
+        AuthZ[Authorization<br/>Permissions]
+    end
+
+    subgraph Routes [Route Handlers]
+        Health[Health Endpoints<br/>/health/*]
+        Run[POST /v1/agent/run<br/>→ Orchestrator]
+        Get[GET /v1/agent/runs/{id}<br/>→ Orchestrator]
+        Auth[POST /auth/email/*<br/>→ Agent Proxy]
+    end
+
+    Client --> CORS
+    CORS --> ReqID
+    ReqID --> SecHdr
+    SecHdr --> Size
+    Size --> AccessLog
+    AccessLog --> RateLimit
+    RateLimit --> APIKey
+    APIKey --> AuthZ
+    AuthZ --> Health
+    AuthZ --> Run
+    AuthZ --> Get
+    AuthZ --> Auth
+
+    Run --> ORC[Orchestrator]
+    Get --> ORC
+    Auth --> AGENT[Agent Service<br/>Reverse Proxy]
+
+    classDef mw fill:#e1f5fe,stroke:#01579b;
+    classDef route fill:#fff3e0,stroke:#e65100;
+
+    class CORS,ReqID,SecHdr,Size,AccessLog,RateLimit,APIKey,AuthZ mw;
+    class Health,Run,Get,Auth route;
+```
 
 ## Endpoints
 
@@ -54,7 +104,7 @@ The gateway requires `AGENEYX_API_KEY` to be set. Clients present it as:
 Authorization: Bearer <AGENEYX_API_KEY>
 ```
 
-Permissions are configured via `AGENEYX_API_KEY_PERMISSIONS` as a comma-separated list. Supported permissions:
+Permissions are configured via `AGENEYX_API_KEY_PERMISSIONS` as a comma-separated list:
 
 | Permission | Allows |
 |------------|--------|
