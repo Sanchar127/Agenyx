@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { randomUUID } from 'crypto';
 
 import { AGENYX_API_BASE_URL } from '@/lib/api/client';
 import { setSessionCookie } from '@/lib/auth/session';
@@ -60,7 +59,7 @@ export async function GET(request: Request) {
   // On successful token exchange, create a response that sets the session
   // cookie and redirects to the playground.
   const secure = process.env.NODE_ENV === 'production';
-  const sessionToken = randomUUID();
+  const sessionToken = crypto.randomUUID();
 
   const nextResponse = NextResponse.redirect(new URL('/playground', request.url));
   setSessionCookie(nextResponse, sessionToken, secure);

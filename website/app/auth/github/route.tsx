@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { redirect } from 'next/navigation';
 
-import { AGENYX_API_BASE_URL } from '@/lib/api/client';
-import { setSessionCookie } from '@/lib/auth/session';
+import { getOAuthAuthorizeUrl } from '@/lib/auth/oauth';
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
 
@@ -30,7 +28,7 @@ export async function GET() {
 
   const redirectUri = `${process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'}/auth/github/callback`;
 
-  return redirect(
+  return NextResponse.redirect(
     `${GITHUB_AUTHORIZE_URL}?client_id=${clientId}&redirect_uri=${redirectUri}&state=${state}&scope=read:user`,
   );
 }
