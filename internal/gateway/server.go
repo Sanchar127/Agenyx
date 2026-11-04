@@ -97,6 +97,31 @@ func newGatewayServer(
 		return resolvedClientIP(r, trustedProxies)
 	}
 
+	// Initialize session store (24 hour TTL).
+	sessionStore := NewSessionStore(24 * time.Hour)
+
+	// Register OAuth providers from environment variables.
+	if googleClientID := os.Getenv("GOOGLE_OAUTH_CLIENT_ID"); googleClientID != "" {
+		registerOAuthProvider(
+			"google",
+			"https://oauth2.googleapis.com/token",
+			"https://www.googleapis.com/oauth2/v2/userinfo",
+			googleClientID,
+			os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"),
+			"openid email profile",
+		)
+	}
+	if githubClientID := os.Getenv("GITHUB_OAUTH_CLIENT_ID"); githubClientID != "" {
+		registerOAuthProvider(
+			"github",
+			"https://github.com/login/oauth/access_token",
+			"https://api.github.com/user",
+			githubClientID,
+			os.Getenv("GITHUB_OAUTH_CLIENT_SECRET"),
+			"read:user",
+		)
+	}
+
 	mux := http.NewServeMux()
 
 	// Liveness only checks whether the Go gateway is running.
@@ -184,6 +209,73 @@ func newGatewayServer(
 	agentProxy := httputil.NewSingleHostReverseProxy(agentURL)
 	mux.Handle("POST /auth/email/login", agentProxy)
 	mux.Handle("POST /auth/email/signup", agentProxy)
+
+	// OAuth token exchange endpoints (backend handles code exchange).
+	mux.HandleFunc("POST /auth/{provider}/token", func(w http.ResponseWriter, r *http.Request) {
+		provider := r.PathValue("provider")
+
+		// Only allow configured providers.
+		if _, ok := oauthProviders[provider]; !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{
+				"error": "OAuth provider not configured",
+			})
+			return
+		}
+
+		var req struct {
+			Code         string `json:"code"`
+			ClientID     string `json:"client_id"`
+			RedirectURI  string `json:"redirect_uri"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid request body",
+			})
+			return
+		}
+
+		if req.Code == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "authorization code is required",
+			})
+			return
+		}
+
+		// Exchange the authorization code for an access token.
+		tokenResp, err := exchangeCode(provider, req.Code, req.RedirectURI)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "token exchange failed: " + err.Error(),
+			})
+			return
+		}
+
+		// Fetch user info from the provider.
+		subject, email, name, err := fetchUserInfo(provider, tokenResp.AccessToken)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "user info fetch failed: " + err.Error(),
+			})
+			return
+		}
+
+		// Create a session.
+		sessionToken := sessionStore.Create(provider, subject, email, name)
+
+		secure := false
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			secure = true
+		}
+
+		writeSessionCookie(w, sessionToken, secure)
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"status":  "authenticated",
+			"provider": provider,
+			"email":   email,
+			"name":    name,
+		})
+	})
 
 	// No reverse proxy: unsupported API routes return 404.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

@@ -249,7 +249,9 @@ func (l *RateLimiter) Middleware(next http.Handler) http.Handler {
 func (l *RateLimiter) MiddlewareWithClientIP(resolve func(*http.Request) string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			// Apply rate limiting to /v1/ API routes and /auth/ auth routes.
+			if !strings.HasPrefix(r.URL.Path, "/v1/") &&
+				!strings.HasPrefix(r.URL.Path, "/auth/") {
 				next.ServeHTTP(w, r)
 				return
 			}

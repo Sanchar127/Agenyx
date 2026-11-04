@@ -1,9 +1,7 @@
 import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { redirect } from 'next/navigation';
 
-import { AGENYX_API_BASE_URL } from '@/lib/api/client';
-import { setSessionCookie } from '@/lib/auth/session';
+import { getOAuthAuthorizeUrl } from '@/lib/auth/oauth';
 
 const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 
@@ -38,5 +36,7 @@ export async function GET() {
     state,
   });
 
-  return redirect(`${GOOGLE_AUTHORIZE_URL}?${params.toString()}`);
+  return NextResponse.redirect(
+    `${GOOGLE_AUTHORIZE_URL}?${params.toString()}`,
+  );
 }
