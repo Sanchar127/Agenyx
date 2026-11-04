@@ -1,0 +1,57 @@
+---
+title: Operations
+description: Operations overview — deployment, configuration, and monitoring for running Agenyx in production.
+---
+
+# Operations
+
+This section covers everything you need to deploy, configure, and operate Agenyx in production.
+
+## Subsections
+
+- [Deployment](./deployment.mdx) — Docker Compose and Kubernetes deployment guides
+- [Configuration](./configuration.mdx) — Environment variables and configuration reference
+
+## Architecture at a Glance
+
+```mermaid
+graph TB
+    Client((Client)) -->|HTTPS| GW[API Gateway]
+    GW -->|Orchestrate| ORC[Orchestrator]
+    ORC -->|Queue| VK[Valkey]
+    VK -->|Execute| WK[Task Worker]
+    WK -->|Reason| AG[Agent Service]
+    AG -->|Route| RT[Semantic Router]
+    AG -->|Infer| INF[Inference Service]
+    AG -->|Tools| SB[Sandbox]
+    AG -->|Persist| PG[PostgreSQL]
+
+    subgraph Monitoring [Observability]
+        PROM[Prometheus]
+        TEMPO[Tempo]
+        ALLOY[Alloy]
+    end
+
+    INF --> PROM
+    INF --> TEMPO
+    AG --> PROM
+
+    classDef svc fill:#e1f5fe,stroke:#01579b;
+    classDef store fill:#f3e5f5,stroke:#4a148c;
+    classDef obs fill:#f3e5f5,stroke:#4a148c;
+
+    class GW,ORC,WK,AG,RT,INF,SB svc;
+    class VK,PG store;
+    class PROM,TEMPO,ALLOY obs;
+```
+
+## Key Operational Concerns
+
+| Concern | Details |
+|---------|---------|
+| **TLS** | Gateway terminates TLS on `:443`; HTTP `:80` redirects to HTTPS |
+| **Secrets** | API keys, database URLs, and MCP tokens via `.env` |
+| **Health checks** | `/health/live`, `/health/ready` on gateway; `/health`, `/ready` on inference |
+| **Scaling** | Kubernetes HPA configs for agent, inference, worker, router |
+| **Backups** | Valkey and PostgreSQL persistent volumes |
+| **Monitoring** | Prometheus metrics, OpenTelemetry traces, Alloy collector |

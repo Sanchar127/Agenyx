@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 
-import { getOAuthAuthorizeUrl } from '@/lib/auth/oauth';
+import { AGENYX_API_BASE_URL } from '@/lib/api/client';
+import { setSessionCookie } from '@/lib/auth/session';
 
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
 

@@ -1,0 +1,144 @@
+---
+title: Configuration
+description: Environment variables and configuration reference for all Agenyx subsystems.
+---
+
+# Configuration
+
+## Objective
+
+The configuration subsystem's objective is to **provide a centralized, environment-driven way to configure every Agenyx subsystem** — with clear defaults, required variables, and validation at startup.
+
+## What It Does
+
+Agenyx subsystems are configured through environment variables and, for some services, YAML recipe/config files. Environment variables generally take precedence over file-based config.
+
+## API Gateway
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AGENEYX_API_KEY` | Yes | — | Bearer API key for `/v1/` routes |
+| `AGENEYX_API_KEY_PERMISSIONS` | Yes | — | Comma-separated permissions (`agents:run`, `tasks:read`) |
+| `AGENEYX_GATEWAY_RECIPE` | No | `recipes/gateway/default.yaml` | Path to gateway recipe YAML |
+| `AGENEYX_AGENT_URL` | No | `http://agent:8000` | Agent upstream for `/auth/email/*` proxy |
+| `AGENEYX_TRUSTED_PROXIES` | No | — | Trusted CIDRs for client IP resolution |
+| `AGENEYX_CORS_ORIGIN` | No | — | Allowed CORS origin (`*` for any) |
+| `AGENEYX_CORS_ALLOW_CREDENTIALS` | No | `false` | Enable credentials in CORS responses |
+
+### Gateway Recipe (`recipes/gateway/default.yaml`)
+
+```yaml
+apiVersion: agenyx.ai/v1alpha1
+kind: GatewayRecipe
+metadata:
+  name: default-gateway
+  version: "1.0.0"
+spec:
+  rateLimit:
+    requestsPerSecond: 10
+    burst: 20
+  request:
+    maxBodyBytes: 1048576
+```
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `spec.rateLimit.requestsPerSecond` | Token refill rate | `10` |
+| `spec.rateLimit.burst` | Bucket capacity | `20` |
+| `spec.request.maxBodyBytes` | Max request body size | `1048576` (1 MiB) |
+
+## Inference Service
+
+Configuration is loaded from `config/inference.yaml`, with `INFERENCE_`-prefixed environment variables overriding YAML.
+
+### Environment Variables (examples)
+
+| Variable | Description |
+|----------|-------------|
+| `INFERENCE_SERVICE_API_KEY` | Required service-to-service API key |
+| `INFERENCE_PROVIDER_NAMES` | Comma-separated provider names |
+| `INFERENCE_PROVIDER_BACKENDS` | `name=url|type` provider mappings |
+| `INFERENCE_MODEL_DEFINITIONS` | `model_id=provider_name` model mappings |
+| `INFERENCE_OPENAI_API_KEY` | OpenAI-compatible provider API key |
+| `INFERENCE_OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP trace endpoint |
+
+### Runtime Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_retries` | `2` | Max retries per provider request |
+| `request_timeout_seconds` | `120.0` | Upstream timeout |
+| `max_connections` | `100` | HTTP max connections |
+| `max_keepalive_connections` | `20` | HTTP max keepalive |
+| `max_concurrency` | `10` | Concurrent admission limit |
+| `max_failover_attempts` | `3` | Max failover attempts per model |
+
+### Request Limits
+
+| Setting | Default |
+|---------|---------|
+| `max_request_body_bytes` | `1048576` (1 MiB) |
+| `max_messages` | `100` |
+| `max_message_content_chars` | `100000` |
+| `max_total_message_content_chars` | `500000` |
+
+## Task Worker
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENTYX_VALKEY_URL` | `redis://valkey:6379/0` | Valkey URL |
+| `AGENTYX_TASK_STREAM` | `agenyx:tasks` | Task stream |
+| `AGENTYX_CONSUMER_GROUP` | `agenyx-workers` | Consumer group |
+| `AGENTYX_CONSUMER_NAME` | hostname | Consumer name |
+| `AGENTYX_AGENT_URL` | `http://agent:8000` | Agent URL |
+| `AGENTYX_AGENT_TIMEOUT_SECONDS` | `120` | Agent call timeout (s) |
+| `AGENTYX_MAX_ATTEMPTS` | `4` | Max execution attempts |
+| `AGENTYX_RETRY_BASE_DELAY_SECONDS` | `5` | Base retry delay (s) |
+| `AGENTYX_RETRY_MAX_DELAY_SECONDS` | `60` | Max retry delay (s) |
+| `AGENTYX_PENDING_IDLE_SECONDS` | `10` | Pending claim idle (s) |
+| `AGENTYX_PENDING_BATCH_SIZE` | `10` | Pending claim batch |
+
+## Semantic Router
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENTYX_VALKEY_URL` | `redis://valkey:6379/0` | Valkey URL (session store) |
+
+Router models, capabilities, and priorities are defined in its registry configuration.
+
+## Agent Service
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AGENTYX_ROUTER_BASE_URL` | No | `http://router:8005` | Router URL |
+| `AGENTYX_INFERENCE_BASE_URL` | No | `http://inference:8004` | Inference URL |
+| `AGENTYX_SANDBOX_BASE_URL` | No | `http://sandbox:9000` | Sandbox URL |
+| `AGENTYX_DATABASE_URL` | Yes | — | PostgreSQL URL |
+| `AGENTYX_INFERENCE_SERVICE_API_KEY` | Yes | — | Inference API key |
+| `AGENEYX_MCP_GATEWAY_TOKEN` | Yes | — | MCP gateway token |
+
+## Website
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NEXT_PUBLIC_AGENYX_API_URL` | `https://localhost:8443` | Gateway API URL |
+| `NEXT_PUBLIC_SITE_URL` | `http://localhost:3000` | Site URL |
+| `NEXT_PUBLIC_GITHUB_CLIENT_ID` | — | GitHub OAuth client ID |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
+
+## Data Stores
+
+| Store | Variable | Default |
+|-------|----------|---------|
+| Valkey | `AGENTYX_VALKEY_URL` | `redis://valkey:6379/0` |
+| PostgreSQL | `AGENTYX_DATABASE_URL` | (required) |

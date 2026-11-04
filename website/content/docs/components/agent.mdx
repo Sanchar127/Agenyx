@@ -1,0 +1,84 @@
+---
+title: Agent Service
+description: LLM-powered agent reasoning — objective, tool execution, persistence, and integrations.
+---
+
+# Agent Service
+
+## Objective
+
+The Agent Service's objective is to **be the reasoning core of Agenyx** — accepting execution intents, planning and running multi-step agent runs using LLMs, invoking tools (including sandboxed tools), and persisting execution state to PostgreSQL.
+
+## What It Does
+
+| Capability | Description |
+|------------|-------------|
+| **Reasoning** | Plan and execute multi-step agent runs using an LLM. |
+| **Tool execution** | Run builtin tools and calculator; route tool calls through the sandbox when isolation is needed. |
+| **MCP gateway routing** | Connect to Model Context Protocol servers for external tools. |
+| **Persistence** | Store executions, steps, and results in PostgreSQL (via SQLAlchemy/Alembic migrations). |
+| **Streaming** | Stream runtime events to clients during execution. |
+| **Authorization & idempotency** | Authorize actions and guarantee idempotent retries. |
+| **Crash recovery** | Recover in-flight executions after worker or process failure. |
+
+## Architecture
+
+```mermaid
+graph TB
+    Worker((Task Worker)) -->|POST /v1/agent/run| AG[Agent Service<br/>Python, :8000]
+
+    subgraph Agent [Agent Service]
+        API[API Routes<br/>execution, tools, auth]
+        Runtime[Runtime<br/>planning, steps, events]
+        Planner[Planner<br/>next step decision]
+        Decision[Decision Engine<br/>tool + argument selection]
+        Context[Context Manager<br/>conversation history]
+        ToolReg[Tool Registry<br/>builtin, calculator]
+        ToolExec[Tool Executor<br/>idempotent tool calls]
+        MCP[MCP Gateway Client<br/>external tools]
+        Inference[Inference Client<br/>→ Inference Service]
+        Sandbox[Sandbox Client<br/>→ Sandbox service]
+        Store[Execution Store<br/>PostgreSQL]
+        Events[Event Stream<br/>runtime events]
+    end
+
+    AG --> API
+    API --> Runtime
+    Runtime --> Planner
+    Planner --> Decision
+    Decision --> ToolReg
+    Decision --> ToolExec
+    ToolExec --> Sandbox
+    ToolExec --> MCP
+    Planner --> Inference
+    Runtime --> Store
+    Runtime --> Events
+
+    Inference --> INF[(Inference Service<br/>:8004)]
+    Sandbox --> SB[(Sandbox<br/>:9000)]
+    MCP --> MCPGW[(MCP Gateway)]
+    Store --> PG[(PostgreSQL)]
+
+    classDef proc fill:#e1f5fe,stroke:#01579b;
+    classDef ext fill:#fff3e0,stroke:#e65100;
+    classDef store fill:#f3e5f5,stroke:#4a148c;
+
+    class API,Runtime,Planner,Decision,Context,ToolReg,ToolExec,MCP,Inference,Sandbox,Events proc;
+    class INF,SB,MCPGW ext;
+    class PG store;
+```
+
+## Integration
+
+| Integration | Environment Variable | Default |
+|-------------|---------------------|---------|
+| Inference | `AGENTYX_INFERENCE_BASE_URL` | `http://inference:8004` |
+| Router | `AGENTYX_ROUTER_BASE_URL` | `http://router:8005` |
+| Sandbox | `AGENTYX_SANDBOX_BASE_URL` | `http://sandbox:9000` |
+| Database | `AGENTYX_DATABASE_URL` | (required) |
+| MCP Gateway | `AGENEYX_MCP_GATEWAY_TOKEN` | (required) |
+| Inference API Key | `AGENTYX_INFERENCE_SERVICE_API_KEY` | (required) |
+
+## Port
+
+The Agent service runs on port `8000` and is reachable at `http://agent:8000` within Docker Compose.
