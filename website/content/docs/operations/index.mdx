@@ -26,15 +26,31 @@ graph TB
     AG -->|Tools| SB[Sandbox]
     AG -->|Persist| PG[PostgreSQL]
 
-    subgraph Monitoring [Observability]
-        PROM[Prometheus]
-        TEMPO[Tempo]
-        ALLOY[Alloy]
+    subgraph Monitoring [Centralized Observability — all services]
+        PROM[Prometheus<br/>metrics]
+        GRAFANA[Grafana<br/>dashboard]
+        LOKI[Loki<br/>logs]
+        TEMPO[Tempo<br/>traces]
+        OTEL[OpenTelemetry<br/>collector]
+        ALLOY[Alloy<br/>log collector]
     end
 
-    INF --> PROM
-    INF --> TEMPO
+    GW --> PROM
+    ORC --> PROM
+    WK --> PROM
     AG --> PROM
+    RT --> PROM
+    INF --> PROM
+    SB --> PROM
+
+    AG --> OTEL
+    RT --> OTEL
+    WK --> OTEL
+    INF --> OTEL
+    OTEL --> PROM
+    OTEL --> TEMPO
+
+    ALLOY --> LOKI
 
     classDef svc fill:#e1f5fe,stroke:#01579b;
     classDef store fill:#f3e5f5,stroke:#4a148c;
@@ -42,7 +58,7 @@ graph TB
 
     class GW,ORC,WK,AG,RT,INF,SB svc;
     class VK,PG store;
-    class PROM,TEMPO,ALLOY obs;
+    class PROM,GRAFANA,LOKI,TEMPO,OTEL,ALLOY obs;
 ```
 
 ## Key Operational Concerns
@@ -50,8 +66,8 @@ graph TB
 | Concern | Details |
 |---------|---------|
 | **TLS** | Gateway terminates TLS on `:443`; HTTP `:80` redirects to HTTPS |
-| **Secrets** | API keys, database URLs, and MCP tokens via `.env` |
+| **Secrets** | API keys, database URLs, and MCP tokens via `.env` / Kubernetes Secrets |
 | **Health checks** | `/health/live`, `/health/ready` on gateway; `/health`, `/ready` on inference |
-| **Scaling** | Kubernetes HPA configs for agent, inference, worker, router |
+| **Scaling** | Kubernetes HPA configs (CPU + memory) for agent, inference, worker, router, orchestrator |
 | **Backups** | Valkey and PostgreSQL persistent volumes |
-| **Monitoring** | Prometheus metrics, OpenTelemetry traces, Alloy collector |
+| **Monitoring** | Centralized: Prometheus metrics + Loki logs + Tempo traces for **all** services, visualized in Grafana |

@@ -99,35 +99,83 @@ The `./agenyx serve` command validates the Docker Compose configuration, builds 
 
 ## Kubernetes
 
-Production manifests live under `deploy/kubernetes/`, organized by component with Kustomize.
+Production manifests live under `deploy/kubernetes/`, managed with Kustomize.
 
 ### Layout
 
 ```
 deploy/kubernetes/
-├── namespace.yaml
-├── kustomization.yaml
-├── agent/               # Deployment, Service, HPA, PDB, NetworkPolicy, Secret, ConfigMap, SA
-├── inference/           # Deployment, Service, HPA, Servicemonitor, ...
-├── router/              # Deployment, Service, ...
-├── worker/              # Deployment, Service, HPA, ...
-├── orchestrator/        # Deployment, Service, ...
-├── valkey/              # Statefulset, Service, ...
-├── valkey-single-backup/# Backup configuration
-└── monitoring/          # Prometheus, Tempo, Alloy
+├── namespace.yaml                  # the `agenyx` namespace
+├── kustomization.yaml              # composes agenyx + monitoring
+├── agenyx/                         # ─── ALL platform services (one consolidated deployment)
+│   ├── kustomization.yaml
+│   ├── configmaps.yaml             # config for every service
+│   ├── secrets.yaml                # secrets for every service
+│   ├── serviceaccounts.yaml        # service account per service
+│   ├── services.yaml               # ClusterIP service per service
+│   ├── servicemonitors.yaml        # Prometheus scrape config for every service
+│   ├── deployments.yaml            # agent, inference, orchestrator, router, worker
+│   ├── statefulsets.yaml           # valkey (3 replicas, persistent)
+│   ├── hpametrics.yaml             # HPA per service (CPU + memory)
+│   ├── pdbs.yaml                   # PodDisruptionBudget per service
+│   ├── networkpolicies.yaml        # ingress/egress policy per service
+│   └── prometheusrules.yaml        # platform alerting rules
+└── monitoring/                     # centralized observability
+    ├── kustomization.yaml
+    ├── namespace.yaml              # the `monitoring` namespace
+    ├── prometheus/                 # kube-prometheus-stack (Prometheus, Grafana, Alertmanager)
+    ├── opentelemetry/              # OTel collector (metrics + traces + logs)
+    ├── alloy/                      # Alloy (log collection → Loki)
+    ├── loki/                       # Loki (log storage)
+    └── tempo/                      # Tempo (distributed tracing)
 ```
 
-Each component directory contains its own `kustomization.yaml`, and the root `kustomization.yaml` composes them.
+The `agenyx/` directory is a **single consolidated production deployment**: every
+Agenyx service (agent, inference, orchestrator, router, worker, valkey) is declared
+together with its ConfigMap, Secret, ServiceAccount, Service, ServiceMonitor,
+Deployment/StatefulSet, HPA, PDB, and NetworkPolicy. This replaces the previous
+per-component directories so the stack can be reviewed, applied, and operated as one
+production unit.
+
+Each service is production-grade:
+
+- **Replicas & scaling** — multi-replica Deployments with a HorizontalPodAutoscaler
+  (CPU + memory) per service.
+- **Availability** — RollingUpdate strategy (`maxUnavailable: 0`, `maxSurge: 1`) and a
+  PodDisruptionBudget per service.
+- **Health** — startup, liveness, and readiness probes on every HTTP service.
+- **Security** — `runAsNonRoot`, `seccompProfile: RuntimeDefault`,
+  `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, and
+  `capabilities: drop: [ALL]` on every container.
+- **Placement** — topology spread constraints across nodes.
+- **Networking** — namespace-scoped ClusterIP services and per-service NetworkPolicies.
+
+### Applying
+
+```bash
+# Prerequisites: kubectl, a running cluster, kustomize (built into kubectl)
+kubectl apply --kustomize deploy/kubernetes
+
+# Check the platform
+kubectl -n agenyx get deploy,sts,hpa,pdb,svc
+kubectl -n monitoring get prometheus,grafana,servicemonitor
+```
 
 ### Monitoring
 
-The `monitoring/` directory holds observability components:
+The `monitoring/` directory holds centralized observability for **all** services:
 
-- **Prometheus** — metrics collection (`values.yaml`)
-- **Tempo** — distributed tracing
-- **Alloy** — telemetry collector (DaemonSet, ClusterRole, config)
+- **Prometheus** — metrics scraped from every service via `ServiceMonitor`s
+  (`servicemonitors.yaml`).
+- **Grafana** — dashboards (including "Agenyx Platform — All Services") with
+  Prometheus, Loki, and Tempo datasources.
+- **OpenTelemetry Collector** — receives metrics, traces, and logs from every
+  service over OTLP; exports metrics to Prometheus and traces to Tempo.
+- **Alloy** — DaemonSet collecting Kubernetes pod logs and forwarding to Loki.
+- **Loki** — log storage; **Tempo** — distributed tracing storage.
 
-The Inference service exports Prometheus metrics at `/metrics` and OpenTelemetry traces to the Alloy collector.
+Every Agenyx service exports OpenTelemetry metrics/traces/logs to the collector, so
+metrics, logs, and traces are correlated in one Grafana dashboard.
 
 ## CLI
 
