@@ -172,10 +172,115 @@ services:
       AGENTYX_CONSUMER_GROUP: agenyx-workers
       AGENTYX_AGENT_URL: http://agent:8000
       INFERENCE_URL: http://inference:8004
+      INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY}
 
     depends_on:
       - valkey
       - agent
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────
+  # Evaluation API - Go
+  # ─────────────────────────────
+  evaluation-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: agenyx-eval-api
+
+    command: ["./agenyx", "eval-api"]
+
+    environment:
+      EVAL_API_ADDR: :8006
+      EVAL_DATABASE_URL: ${AGENTYX_DATABASE_URL:?AGENTYX_DATABASE_URL must be set}
+      EVAL_VALKEY_URL: redis://valkey:6379/0
+      EVAL_VALKEY_STREAM: eval:jobs
+      EVAL_VALKEY_CONSUMER_GROUP: eval-workers
+      INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY:?INFERENCE_SERVICE_API_KEY must be set}
+      EVAL_API_KEY: ${EVAL_API_KEY:-}
+
+    expose:
+      - "8006"
+
+    ports:
+      - "8006:8006"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────
+  # Evaluation Scheduler - Go
+  # ─────────────────────────────
+  evaluation-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: agenyx-eval-scheduler
+
+    command: ["./agenyx", "eval-scheduler"]
+
+    environment:
+      EVAL_SCHEDULER_ADDR: :8007
+      EVAL_DATABASE_URL: ${AGENTYX_DATABASE_URL:?AGENTYX_DATABASE_URL must be set}
+      EVAL_VALKEY_URL: redis://valkey:6379/0
+      EVAL_VALKEY_STREAM: eval:jobs
+      EVAL_VALKEY_CONSUMER_GROUP: eval-workers
+      EVAL_JOB_LEASE_SECONDS: "300"
+      EVAL_MAX_JOB_ATTEMPTS: "3"
+      INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY:?INFERENCE_SERVICE_API_KEY must be set}
+
+    expose:
+      - "8007"
+
+    ports:
+      - "8007:8007"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      valkey:
+        condition: service_started
+
+    restart: unless-stopped
+
+
+  # ─────────────────────────────
+  # Evaluation Worker - Python (AI evaluation / document ingestion)
+  # ─────────────────────────────
+  evaluation-worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+
+    container_name: agenyx-eval-worker
+
+    command: ["python", "-m", "app.eval.worker"]
+
+    volumes:
+      - ./worker:/app
+
+    environment:
+      AGENTYX_VALKEY_URL: redis://valkey:6379/0
+      AGENTYX_TASK_STREAM: eval:jobs
+      AGENTYX_CONSUMER_GROUP: eval-workers
+      AGENTYX_AGENT_URL: http://agent:8000
+      INFERENCE_URL: http://inference:8004
+      INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY}
+
+    depends_on:
+      - valkey
+      - agent
+      - inference
 
     restart: unless-stopped
 
