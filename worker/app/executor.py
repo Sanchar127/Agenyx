@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.agent_client import AgentClient
+from app.ingestion.tasks import IngestTaskHandler, make_handler
 from app.queue import WorkerQueue
 
 
@@ -19,13 +20,14 @@ def iso_now() -> str:
 
 
 class TaskExecutor:
-    """Execute queued tasks through the Agent service."""
+    """Execute queued tasks through the Agent service or ingestion handler."""
 
     def __init__(
         self,
         *,
         queue: WorkerQueue,
         agent_client: AgentClient,
+        ingest_handler: IngestTaskHandler | None = None,
         max_attempts: int = 4,
         retry_base_delay_seconds: int = 5,
         retry_max_delay_seconds: int = 60,
@@ -33,6 +35,7 @@ class TaskExecutor:
     ) -> None:
         self.queue = queue
         self.agent_client = agent_client
+        self.ingest_handler = ingest_handler
 
         self.max_attempts = max_attempts
         self.retry_base_delay_seconds = retry_base_delay_seconds
@@ -72,6 +75,17 @@ class TaskExecutor:
         )
 
         try:
+            # Route document ingestion tasks to the ingestion handler.
+            if intent == "document.ingest" and self.ingest_handler is not None:
+                await self.ingest_handler.handle(
+                    message_id=message_id,
+                    payload=payload,
+                )
+                # After successful ingestion, mark as completed.
+                # The handler already updates state in Valkey.
+                self.queue.acknowledge(message_id)
+                return
+
             result = await self.agent_client.run(intent)
 
         except asyncio.CancelledError:

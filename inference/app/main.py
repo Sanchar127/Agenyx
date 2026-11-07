@@ -24,6 +24,8 @@ from app.models import ModelDefinition, ModelRegistry
 from app.providers.openai_compatible import OpenAICompatibleProvider
 from app.providers.registry import ProviderRegistry
 from app.reliability.manager import ReliabilityManager
+from app.rag.bootstrap import init_rag, shutdown_rag
+from app.rag.router import router as rag_router
 from app.telemetry import configure_telemetry, instrument_app
 
 
@@ -201,9 +203,31 @@ async def lifespan(app: FastAPI):
         },
     )
 
+    # Initialize RAG pipeline (embedding + pgvector + retriever).
+    try:
+        await init_rag(failover=failover)
+        logger.info("RAG pipeline initialized")
+    except Exception as exc:
+        # RAG initialization failure must not take down inference.
+        logger.error(
+            "RAG initialization failed; RAG endpoints unavailable",
+            extra={"error_type": type(exc).__name__},
+            exc_info=True,
+        )
+
     yield
 
     logger.info("Inference service shutting down")
+
+    # Shutdown RAG resources.
+    try:
+        await shutdown_rag()
+        logger.info("RAG pipeline shut down")
+    except Exception as exc:
+        logger.warning(
+            "RAG shutdown encountered an error",
+            extra={"error_type": type(exc).__name__},
+        )
 
     await provider_registry.close()
 
@@ -225,6 +249,9 @@ app = FastAPI(
 )
 
 instrument_app(app)
+
+# RAG routes
+app.include_router(rag_router)
 
 
 # =========================================================
