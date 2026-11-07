@@ -1,7 +1,4 @@
 import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
-
-import { getOAuthAuthorizeUrl } from '@/lib/auth/oauth';
 
 const GOOGLE_AUTHORIZE_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 
@@ -16,16 +13,6 @@ export async function GET() {
   }
 
   const state = crypto.randomUUID();
-  const cookieStore = await cookies();
-
-  cookieStore.set('agenyx_oauth_state', state, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 300,
-  });
-
   const redirectUri = `${process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'}/auth/google/callback`;
 
   const params = new URLSearchParams({
@@ -36,7 +23,18 @@ export async function GET() {
     state,
   });
 
-  return NextResponse.redirect(
+  const response = NextResponse.redirect(
     `${GOOGLE_AUTHORIZE_URL}?${params.toString()}`,
   );
+
+  // Carry the CSRF state cookie on the redirect so the callback can verify it.
+  response.cookies.set('agenyx_oauth_state', state, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 300,
+  });
+
+  return response;
 }

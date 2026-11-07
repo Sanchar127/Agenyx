@@ -1,0 +1,72 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: agenyx-platform-alerts
+  labels:
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: agenyx-service-health
+      rules:
+        # ──────────────────────────────────────────────
+        # Service availability
+        # ──────────────────────────────────────────────
+        - alert: AgenyxServiceDown
+          expr: up{job=~"agenyx-(agent|inference|router|orchestrator|worker|valkey)"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            service: agenyx
+          annotations:
+            summary: "Agenyx service {{ $labels.job }} is down"
+            description: "The {{ $labels.job }} service has not been scraped by Prometheus for more than 2 minutes."
+
+        # ──────────────────────────────────────────────
+        # Resource saturation
+        # ──────────────────────────────────────────────
+        - alert: AgenyxHighCpuUsage
+          expr: avg by (job) (rate(container_cpu_usage_seconds_total{job=~"agenyx-(agent|inference|router|orchestrator|worker|valkey)",image!=""}[5m])) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+            service: agenyx
+          annotations:
+            summary: "High CPU usage on {{ $labels.job }}"
+            description: "CPU usage for {{ $labels.job }} is above 85%."
+
+        - alert: AgenyxHighMemoryUsage
+          expr: avg by (job) (container_memory_working_set_bytes{job=~"agenyx-(agent|inference|router|orchestrator|worker|valkey)",image!=""}) / avg by (job) (kube_pod_container_resource_requests_memory_bytes{job=~"agenyx-(agent|inference|router|orchestrator|worker|valkey)",container!=""}) * 100 > 85
+          for: 5m
+          labels:
+            severity: warning
+            service: agenyx
+          annotations:
+            summary: "High memory usage on {{ $labels.job }}"
+            description: "Memory usage for {{ $labels.job }} is above 85% of requested."
+
+        # ──────────────────────────────────────────────
+        # Error rate
+        # ──────────────────────────────────────────────
+        - alert: AgenyxHighErrorRate
+          expr: sum by (job) (rate(http_requests_total{job=~"agenyx-(agent|inference|router|orchestrator|worker)",code=~"5.."}[5m])) / sum by (job) (rate(http_requests_total{job=~"agenyx-(agent|inference|router|orchestrator|worker)"}[5m])) > 0.05
+          for: 3m
+          labels:
+            severity: warning
+            service: agenyx
+          annotations:
+            summary: "High HTTP error rate on {{ $labels.job }}"
+            description: "More than 5% of requests to {{ $labels.job }} are returning 5xx errors."
+
+        # ──────────────────────────────────────────────
+        # Latency
+        # ──────────────────────────────────────────────
+        - alert: AgenyxHighLatency
+          expr: histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket{job=~"agenyx-(agent|inference|router|orchestrator|worker)"}[5m]))) > 2
+          for: 5m
+          labels:
+            severity: warning
+            service: agenyx
+          annotations:
+            summary: "High p95 latency on {{ $labels.job }}"
+            description: "p95 request latency for {{ $labels.job }} is above 2 seconds."

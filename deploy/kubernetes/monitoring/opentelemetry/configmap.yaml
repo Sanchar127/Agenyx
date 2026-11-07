@@ -3,7 +3,9 @@ kind: ConfigMap
 metadata:
   name: agenyx-otel-collector
   namespace: monitoring
-
+  labels:
+    app.kubernetes.io/name: agenyx-otel-collector
+    app.kubernetes.io/part-of: agenyx
 data:
   otel-collector-config.yaml: |
     receivers:
@@ -24,11 +26,21 @@ data:
         send_batch_size: 1024
         timeout: 5s
 
+      # Resource detection adds Kubernetes metadata to every metric/trace/log.
+      resource:
+        attributes:
+          - key: service.namespace
+            value: agenyx
+            action: insert
+
     exporters:
       otlp/tempo:
         endpoint: agenyx-tempo.monitoring.svc.cluster.local:4317
         tls:
           insecure: true
+
+      prometheus:
+        endpoint: "0.0.0.0:9464"
 
       debug:
         verbosity: basic
@@ -41,6 +53,26 @@ data:
           processors:
             - memory_limiter
             - batch
+            - resource
           exporters:
             - otlp/tempo
+            - debug
+        metrics:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - batch
+            - resource
+          exporters:
+            - prometheus
+            - debug
+        logs:
+          receivers:
+            - otlp
+          processors:
+            - memory_limiter
+            - batch
+            - resource
+          exporters:
             - debug

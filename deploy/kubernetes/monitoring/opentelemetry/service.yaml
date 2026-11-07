@@ -21,3 +21,8 @@ spec:
       port: 4318
       targetPort: otlp-http
       protocol: TCP
+
+    - name: prometheus
+      port: 9464
+      targetPort: prometheus
+      protocol: TCP

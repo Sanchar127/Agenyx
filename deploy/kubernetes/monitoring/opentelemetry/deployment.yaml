@@ -39,6 +39,10 @@ spec:
               containerPort: 4318
               protocol: TCP
 
+            - name: prometheus
+              containerPort: 9464
+              protocol: TCP
+
           resources:
             requests:
               cpu: 100m

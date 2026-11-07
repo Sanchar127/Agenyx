@@ -54,21 +54,21 @@ export function AuthPanel({ mode, error }: AuthPanelProps) {
           <CredentialsForm mode={isLogin ? 'login' : 'signup'} />
 
           <div className='mt-8 flex flex-col gap-3'>
-            <Link
+            <a
               href='/auth/github'
               className='inline-flex h-11 items-center justify-center gap-2 rounded-md bg-emerald-600 px-6 text-sm font-semibold text-white transition-colors hover:bg-emerald-500'
             >
               <GitHubMark />
               Continue with GitHub
-            </Link>
+            </a>
 
-            <Link
+            <a
               href='/auth/google'
               className='inline-flex h-11 items-center justify-center gap-2 rounded-md border border-fd-border bg-fd-background px-6 text-sm font-semibold text-fd-foreground transition-colors hover:bg-fd-muted'
             >
               <GoogleMark />
               Continue with Google
-            </Link>
+            </a>
           </div>
 
           <p className='mt-6 text-center text-sm text-fd-muted-foreground'>
