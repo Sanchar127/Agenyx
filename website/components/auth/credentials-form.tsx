@@ -43,9 +43,20 @@ export function CredentialsForm({ mode }: CredentialsFormProps) {
     setIsSubmitting(true);
 
     try {
-      await (isLogin
+      const tokens = await (isLogin
         ? authApi.loginWithEmail
         : authApi.signupWithEmail)(trimmedEmail, password);
+
+      // Establish the session cookie so protected routes (playground)
+      // recognize the authenticated user. The OAuth callback sets this same
+      // cookie server-side; here we set it client-side after the credentials
+      // API returns the access token.
+      const token = (tokens as { access_token?: string })?.access_token;
+      if (token) {
+        document.cookie = `agenyx_session=${token}; Path=/; Max-Age=${
+          60 * 60 * 24
+        }; SameSite=Lax`;
+      }
 
       router.push('/playground');
     } catch (caught) {
