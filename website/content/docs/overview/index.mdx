@@ -31,6 +31,7 @@ Agenyx is designed to make it easier to run and manage AI agents using configura
 | Agent | Python | LLM reasoning, tool execution, Postgres persistence | 8000 |
 | Sandbox | Go | gVisor-isolated tool execution | 9000 |
 | MCP Gateway | Go | Model Context Protocol connectivity | embedded in agent |
+| RAG | Python | Retrieval-augmented generation: embedding, pgvector, hybrid search, context-injected LLM | embedded in inference |
 | Website | TypeScript (Next.js) | Docs, marketing, AI playground | 3000 |
 
 ### Data Stores
@@ -39,6 +40,7 @@ Agenyx is designed to make it easier to run and manage AI agents using configura
 |-------|------|
 | **Valkey** | Task streams, execution state, rate-limiter buckets, router session state |
 | **PostgreSQL** | Durable agent execution storage (via the Agent service) |
+| **PostgreSQL + pgvector** | Document chunks + embeddings for RAG (same Postgres, pgvector extension) |
 
 ## System Architecture
 
@@ -56,12 +58,14 @@ graph TB
     subgraph DataPlane [Data Plane - Python]
         Agent[Agent Service<br/>LLM Reasoning]
         Inference[Inference Service<br/>LLM Gateway]
+        RAG[RAG Pipeline<br/>Embedding + pgvector + Hybrid Search]
         Worker[Task Worker<br/>Execution & Retry]
     end
 
     subgraph Storage [Storage]
         Valkey[(Valkey<br/>Task Streams & State)]
         Postgres[(PostgreSQL<br/>Agent Execution Store)]
+        PGVector[(pgvector<br/>Document Chunks & Embeddings)]
     end
 
     Gateway -->|Submit execution| Orchestrator
@@ -70,6 +74,8 @@ graph TB
     Worker -->|Call agent| Agent
     Agent -->|Select model| Router
     Agent -->|Call LLM| Inference
+    Agent -->|RAG query| RAG
+    RAG -->|Store chunks| PGVector
     Agent -->|Run tools| Sandbox
     Worker -->|Save state| Valkey
     Agent -->|Persist| Postgres
@@ -82,8 +88,8 @@ graph TB
     classDef storage fill:#f3e5f5,stroke:#4a148c;
 
     class Gateway,Orchestrator,Router,Sandbox control;
-    class Agent,Inference,Worker data;
-    class Valkey,Postgres storage;
+    class Agent,Inference,Worker,RAG data;
+    class Valkey,Postgres,PGVector storage;
 ```
 
 ## Request Lifecycle
