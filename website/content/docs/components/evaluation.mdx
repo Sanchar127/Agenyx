@@ -1,0 +1,198 @@
+---
+title: Evaluation Platform
+description: Production-grade evaluation and benchmarking platform for Agenyx — model-independent, asynchronous, independently scalable, and operationally isolated from production workloads.
+---
+
+# Evaluation Platform
+
+## Objective
+
+Agenyx includes a production-grade **Evaluation and Benchmarking Platform** that independently evaluates:
+
+1. **LLM models and inference providers** — correctness, latency, cost, structured output
+2. **AI agent behavior and task completion** — multi-step execution, tool selection, recovery
+3. **Tool calling and tool execution** — success rate, latency, error propagation
+4. **Agent orchestration and scheduling** — queue latency, worker assignment, fairness
+5. **Sandbox execution and isolation** — startup overhead, resource enforcement, timeout
+6. **Distributed runtime performance** — RPS, concurrency, p50/p95/p99 latency
+7. **End-to-end system reliability** — failure rate, recovery behavior
+8. **Production performance and resource efficiency** — CPU, memory, GPU, network
+
+## Design Principles
+
+| Principle | Description |
+|-----------|-------------|
+| **Operational isolation** | Evaluation runs on separate workers and queues; it never interferes with production inference or agent paths |
+| **Independent scalability** | AI evaluation workers, Go benchmark workers, and load-test workers scale independently |
+| **Model independence** | Same evaluation runs against any registered model/provider without code changes |
+| **Async job execution** | All evaluations are asynchronous jobs with lifecycle management |
+| **Reproducible benchmarks** | Every run records an immutable configuration snapshot |
+| **Result comparison** | Historical results are comparable across models, providers, and runtime versions |
+| **Extensible plugins** | New models, providers, benchmarks, and scorers plug in without framework changes |
+| **No unnecessary microservices** | Logical modules share deployment units where appropriate |
+| **Reuse existing infrastructure** | PostgreSQL for metadata, Valkey for job queues, existing Docker Compose/K8s patterns |
+
+## Logical Architecture
+
+```mermaid
+graph TB
+    subgraph Client [Client / Dashboard]
+        UI[Evaluation Dashboard / API Client]
+    end
+
+    subgraph EvalAPI [Evaluation API - Go]
+        EVAL[REST API /api/v1/eval]
+        AUTH[Auth + RBAC]
+        VAL[Request Validation]
+    end
+
+    subgraph EvalSched [Evaluation Scheduler - Go]
+        SCHED[Job Scheduler]
+        PLAN[Execution Planner]
+        QUEUE[Job Queue - Valkey]
+    end
+
+    subgraph EvalWorker [Evaluation Workers - Python]
+        AI_W[AI Evaluation Worker<br/>Inspect AI]
+        DS[Dataset Manager]
+        PROV[Provider Adapters]
+        SCOR[Custom Scorers]
+    end
+
+    subgraph BenchWorker [Benchmark Workers - Go]
+        RT_B[Runtime Benchmark]
+        TP_B[Throughput Benchmark]
+        LT_B[Latency Benchmark]
+        CC_B[Concurrency Benchmark]
+        RL_B[Reliability Benchmark]
+        RES_B[Resource Benchmark]
+    end
+
+    subgraph LoadTest [Load Testing - k6]
+        K6[k6 Load Tests]
+    end
+
+    subgraph Storage [Storage]
+        PG[(PostgreSQL<br/>Evaluation Metadata & Results)]
+        S3[(S3-compatible<br/>Datasets & Artifacts)]
+    end
+
+    UI -->|REST| EVAL
+    AUTH -->|validate| EVAL
+    VAL -->|schema| EVAL
+    EVAL -->|persist| PG
+    EVAL -->|enqueue| QUEUE
+    SCHED -->|dequeue| QUEUE
+    SCHED -->|assign| AI_W
+    SCHED -->|assign| BenchWorker
+    SCHED -->|assign| K6
+    AI_W -->|read| DS
+    AI_W -->|resolve| PROV
+    AI_W -->|score| SCOR
+    AI_W -->|results| PG
+    BenchWorker -->|results| PG
+    K6 -->|results| PG
+    AI_W -->|artifacts| S3
+    BenchWorker -->|artifacts| S3
+    EVAL -->|query| PG
+    UI -->|query| EVAL
+
+    classDef api fill:#e1f5fe,stroke:#01579b;
+    classDef worker fill:#fff3e0,stroke:#e65100;
+    classDef storage fill:#f3e5f5,stroke:#4a148c;
+
+    class EVAL,AUTH,VAL,SCHED,PLAN api;
+    class AI_W,DS,PROV,SCOR,RT_B,TP_B,LT_B,CC_B,RL_B,RES_B,K6 worker;
+    class PG,S3 storage;
+```
+
+## Logical Modules
+
+| Module | Language | Role |
+|--------|----------|------|
+| Evaluation API | Go | REST API, auth, validation, job lifecycle |
+| Evaluation Scheduler | Go | Job scheduling, execution planning, queue management |
+| AI Evaluation Worker | Python | Inspect AI execution, provider adapters, custom scorers |
+| Benchmark Worker | Go | Runtime, throughput, latency, concurrency, reliability benchmarks |
+| Load Testing Worker | k6 | HTTP load, stress, spike, soak testing |
+| Dataset Manager | Python | Dataset versioning, checksums, S3 artifact storage |
+| Model Registry | PostgreSQL | Model/provider registration and capability metadata |
+| Results Collector | Python/Go | Result persistence, trace collection |
+| Result Comparison Engine | Python/Go | Comparative reports across models/runtimes |
+| Report Generator | Python/Go | HTML/JSON/PDF evaluation reports |
+
+## Data Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Eval API
+    participant S as Scheduler
+    participant Q as Valkey Queue
+    participant W as Worker
+    participant P as PostgreSQL
+    participant O as Object Storage
+
+    C->>A: POST /api/v1/evaluations {model, dataset, config}
+    A->>A: Auth + Validate
+    A->>P: Persist evaluation config
+    A->>S: Create execution plan
+    S->>Q: Enqueue job
+    S-->>A: 202 Accepted {job_id}
+    A-->>C: 202 {job_id, status: queued}
+
+    loop Poll status
+        C->>A: GET /api/v1/evaluations/{id}
+        A->>P: Read status
+        A-->>C: status + results (when complete)
+    end
+
+    W->>Q: Claim job (lease-based)
+    W->>P: Read evaluation config
+    W->>O: Download dataset
+    W->>W: Execute (Inspect AI or Go benchmark)
+    W->>O: Upload traces/artifacts
+    W->>P: Persist scores + results
+    W->>Q: Release job lease
+    W-->>A: Job complete signal
+```
+
+## Technology Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Evaluation API | Go 1.26, net/http, chi router |
+| Evaluation Scheduler | Go, go-redis (Valkey) |
+| AI Evaluation Workers | Python, Inspect AI |
+| Benchmark Workers | Go, custom benchmark harness |
+| Load Testing | k6 |
+| Job Queue | Valkey (existing) |
+| Metadata Store | PostgreSQL (existing, pgvector extension) |
+| Artifact Store | S3-compatible (MinIO in dev, S3 in prod) |
+| Observability | Prometheus, OpenTelemetry, Grafana |
+| Container | Docker Compose, Kubernetes (kustomize) |
+
+## Deployment Profile
+
+The evaluation platform uses a **separate deployment profile** that can be started/stopped independently:
+
+```bash
+# Start evaluation platform only
+docker compose -f docker-compose.yml -f docker-compose.eval.yml up -d
+
+# Stop without affecting production
+docker compose -f docker-compose.yml -f docker-compose.eval.yml down
+```
+
+Production services continue operating when the evaluation platform is stopped.
+
+## Project Status
+
+- ✅ Architecture documentation
+- 🚧 Evaluation foundation (API, scheduler, job lifecycle)
+- 🚧 Inspect AI integration
+- 🚧 Go benchmark engine
+- 🚧 Worker pools and auto-scaling
+- 🚧 Results comparison and reporting
+- 🚧 Docker deployment configuration
+- 🚧 Automated tests
