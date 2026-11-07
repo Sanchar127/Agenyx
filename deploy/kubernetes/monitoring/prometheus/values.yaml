@@ -94,14 +94,17 @@ prometheus:
     serviceMonitorNamespaceSelector:
       matchNames:
         - agenyx
+        - monitoring
 
     podMonitorNamespaceSelector:
       matchNames:
         - agenyx
+        - monitoring
 
     ruleNamespaceSelector:
       matchNames:
         - agenyx
+        - monitoring
 
     # ========================================================
     # Resource selection
@@ -375,6 +378,38 @@ grafana:
       drop:
         - ALL
 
+  # ----------------------------------------------------------
+  # Datasources — centralized observability
+  #
+  # Prometheus (metrics), Loki (logs via Alloy), and Tempo
+  # (traces via OpenTelemetry) are wired into Grafana so the
+  # dashboard can correlate metrics, logs, and traces for every
+  # Agenyx service from a single place.
+  # ----------------------------------------------------------
+
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: Prometheus
+          uid: prometheus
+          type: prometheus
+          access: proxy
+          url: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+          isDefault: true
+          editable: true
+        - name: Loki
+          uid: loki
+          type: loki
+          access: proxy
+          url: http://loki.monitoring.svc.cluster.local:3100
+          editable: true
+        - name: Tempo
+          uid: tempo
+          type: tempo
+          access: proxy
+          url: http://agenyx-tempo.monitoring.svc.cluster.local:3200
+          editable: true
 
 # ============================================================
 # Node Exporter

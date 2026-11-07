@@ -1,7 +1,18 @@
+# ──────────────────────────────────────────────────────────────────────
+# Agenyx — Grafana Alloy (centralized log collection)
+#
+# Discovers pods across the cluster, enriches each log stream with
+# Kubernetes metadata (namespace, pod, container, service), and forwards
+# everything to Loki so logs for every Agenyx service are queryable from
+# one place in Grafana.
+# ──────────────────────────────────────────────────────────────────────
+
+# Discover every pod in the cluster.
 discovery.kubernetes "pods" {
   role = "pod"
 }
 
+# Relabel discovered targets into Loki-friendly labels.
 discovery.relabel "pods" {
   targets = discovery.kubernetes.pods.targets
 
@@ -29,15 +40,46 @@ discovery.relabel "pods" {
     source_labels = ["__meta_kubernetes_pod_label_app_kubernetes_io_part_of"]
     target_label  = "part_of"
   }
+
+  # Only keep container logs (exclude non-container targets).
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "__drop"
+    regex         = ""
+    action        = "drop"  # keep only targets that have a container name (noop here)
+  }
 }
 
+# Tail Kubernetes pod logs and forward to Loki.
 loki.source.kubernetes "pods" {
   targets    = discovery.relabel.pods.output
   forward_to = [loki.write.default.receiver]
 }
 
+# Write logs to the centralized Loki instance.
 loki.write "default" {
   endpoint {
     url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+  }
+}
+
+# Expose Alloy's own metrics so Prometheus can scrape the collector itself.
+prometheus.scrape "self" {
+  targets    = discovery.kubernetes.pods.output
+  forward_to = [prometheus.remote_write.prometheus.receiver]
+
+  # Scrape the Alloy HTTP endpoint on each pod.
+  __address__ = __meta_kubernetes_pod_name
+  http_service {
+    scheme = "http"
+    port   = 12345
+    path   = "/metrics"
+  }
+}
+
+# Forward Alloy metrics to Prometheus.
+prometheus.remote_write "prometheus" {
+  endpoint {
+    url = "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090/api/v1/write"
   }
 }

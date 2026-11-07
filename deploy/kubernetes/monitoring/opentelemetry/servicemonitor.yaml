@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-otel-collector
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: agenyx-otel-collector
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-otel-collector
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  endpoints:
+    - port: prometheus
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s
