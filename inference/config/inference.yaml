@@ -1,11 +1,11 @@
 inference:
-  default_model: qwen2.5:7b
+  default_model: llama3.2:3b
 
   providers:
     - name: ollama-local
       enabled: true
       type: openai-compatible
-      base_url: http://ollama:11434/v1
+      base_url: http://host.docker.internal:11434/v1
       api_key: ollama
 
     - name: vllm-local
@@ -21,7 +21,7 @@ inference:
       api_key: ${OPENAI_API_KEY}
 
   models:
-    - id: qwen2.5:7b
+    - id: llama3.2:3b
       provider: ollama-local
 
     - id: meta-llama/Llama-3.1-8B-Instruct
@@ -31,6 +31,50 @@ inference:
       provider: openai-cloud
 
   failover: {}
+
+rag:
+  enabled: true
+  embedding:
+    provider: ollama-local
+    model: nomic-embed-text
+    dimensions: 768
+    base_url: http://host.docker.internal:11434/v1
+    api_key: ollama
+
+  vector_store:
+    database_url: postgresql+asyncpg://agenyx:agenyx_dev_password@postgres:5432/agenyx
+    table_name: rag_documents
+    embedding_dimensions: 768
+    distance_metric: cosine
+
+  retrieval:
+    top_k: 10
+    hybrid_top_k: 50
+    semantic_weight: 0.7
+    keyword_weight: 0.3
+    min_score: 0.0
+    max_chunks_per_document: 5
+    rerank: false
+
+  generation:
+    model: llama3.2:3b
+    system_prompt: "You are a helpful assistant. Answer the user's question using only the provided context. If the answer cannot be determined from the context, say so. Cite sources using [Source N] notation where N corresponds to the source index."
+    max_context_chars: 12000
+    temperature: 0.2
+    max_tokens: 1000
+
+  chunking:
+    chunk_size: 1000
+    chunk_overlap: 200
+    separators:
+      - "\n\n"
+      - "\n"
+      - ". "
+      - "? "
+      - "! "
+      - "; "
+      - ", "
+      - " "
 
 runtime:
   max_retries: 2

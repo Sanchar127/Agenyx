@@ -52,6 +52,11 @@ class Settings:
             "http://agent:8000",
         )
 
+        self.inference_url = os.getenv(
+            "INFERENCE_URL",
+            "http://inference:8004",
+        )
+
         self.agent_timeout_seconds = float(
             os.getenv(
                 "AGENT_TIMEOUT_SECONDS",

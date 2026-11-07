@@ -15,6 +15,7 @@ from app.agent_runtime.recovery.restart_detector import RestartDetector
 from app.agent_runtime.runtime import AgentRuntime
 from app.api.errors import agenyx_error_handler
 from app.api.routes import create_router
+from app.api.documents import create_document_router
 from app.core.config import get_settings
 from app.core.errors import AgenyxError
 from app.db.session import AsyncSessionFactory
@@ -176,6 +177,14 @@ app.add_exception_handler(
 app.include_router(
     create_router(get_runtime),
 )
+
+# Document upload routes for RAG ingestion.
+document_router = create_document_router(
+    valkey_url=settings.valkey_url,
+    task_stream=settings.task_stream,
+    consumer_group=settings.consumer_group,
+)
+app.include_router(document_router)
 
 # Mount after the existing API routes so their paths retain precedence.
 # The MCP sub-application handles "/" internally, exposed externally as /mcp.

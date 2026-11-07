@@ -213,3 +213,60 @@ PROVIDER_TOTAL_SUCCESSES = Gauge(
     "Total provider successes recorded by the reliability manager.",
     labelnames=("provider",),
 )
+
+
+# =========================================================
+# RAG METRICS
+# =========================================================
+
+RAG_REQUESTS_TOTAL = Counter(
+    "agenyx_rag_requests_total",
+    "Total number of RAG requests.",
+    labelnames=(
+        "endpoint",
+        "status",
+    ),
+)
+
+RAG_REQUEST_DURATION_SECONDS = Histogram(
+    "agenyx_rag_request_duration_seconds",
+    "RAG request duration in seconds.",
+    labelnames=(
+        "endpoint",
+    ),
+    buckets=(
+        0.01,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        30.0,
+        60.0,
+        120.0,
+        300.0,
+    ),
+)
+
+RAG_CHUNKS_RETRIEVED = Histogram(
+    "agenyx_rag_chunks_retrieved",
+    "Number of chunks retrieved per RAG request.",
+    buckets=(1, 2, 3, 5, 10, 20, 50),
+)
+
+RAG_CONTEXT_CHARS = Histogram(
+    "agenyx_rag_context_chars",
+    "Number of context characters injected per RAG request.",
+    buckets=(
+        100,
+        500,
+        1000,
+        2000,
+        5000,
+        10000,
+        20000,
+    ),
+)

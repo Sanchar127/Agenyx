@@ -8,6 +8,7 @@ import signal
 from app.agent_client import AgentClient
 from app.config import get_settings
 from app.executor import TaskExecutor
+from app.ingestion.tasks import make_handler
 from app.queue import WorkerQueue
 from app.worker import Worker
 
@@ -48,6 +49,12 @@ def create_worker() -> Worker:
         timeout=settings.agent_timeout_seconds,
     )
 
+    # Create the ingestion handler for document.ingest tasks.
+    ingest_handler = make_handler(
+        queue=queue,
+        agent_client=agent_client,
+    )
+
     # Create the Worker first so it owns the single
     # shutdown event shared with the executor.
     worker = Worker(
@@ -58,6 +65,7 @@ def create_worker() -> Worker:
     executor = TaskExecutor(
         queue=queue,
         agent_client=agent_client,
+        ingest_handler=ingest_handler,
         max_attempts=settings.max_attempts,
         retry_base_delay_seconds=(
             settings.retry_base_delay_seconds

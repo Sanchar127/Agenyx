@@ -31,6 +31,11 @@ class Settings(BaseSettings):
         "@postgres:5432/agenyx"
     )
 
+    # Valkey (task queue for document ingestion)
+    valkey_url: str = "redis://valkey:6379/0"
+    task_stream: str = "agenyx:tasks"
+    consumer_group: str = "agenyx-workers"
+
     # Authentication
     jwt_secret: str = "development-only-secret"
     jwt_algorithm: str = "HS256"

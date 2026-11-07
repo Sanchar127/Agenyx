@@ -7,44 +7,52 @@ const { rewrite: rewriteDocs } = rewritePath(
   `${docsRoute}{/*path}`,
   `${docsContentRoute}{/*path}/content.md`,
 );
+
 const { rewrite: rewriteSuffix } = rewritePath(
   `${docsRoute}{/*path}.md`,
   `${docsContentRoute}{/*path}/content.md`,
 );
 
-// Paths that require authentication.
-const AUTH_REQUIRED_PATHS = ['/playground'];
+const PROTECTED_ROUTES = ['/playground'];
+const AUTH_ONLY_ROUTES = ['/login', '/signup'];
 
-function isAuthRequiredPath(pathname: string): boolean {
-  return AUTH_REQUIRED_PATHS.some(
-    (p) => pathname === p || pathname.startsWith(p + '/'),
+function isProtected(pathname: string): boolean {
+  return PROTECTED_ROUTES.some(
+    (route) => pathname === route || pathname.startsWith(`${route}/`),
   );
 }
 
 export default function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // --- Protect /playground: require session ---
-  if (isAuthRequiredPath(pathname)) {
-    const session = getSessionCookie(request);
-    if (!session) {
-      const loginUrl = new URL('/login', request.url);
-      loginUrl.searchParams.set('reason', 'auth_required');
-      return NextResponse.redirect(loginUrl);
-    }
+  // Authentication
+  const session = getSessionCookie(request);
+
+  // Protect routes requiring authentication.
+  if (isProtected(pathname) && !session) {
+    const loginUrl = new URL('/login', request.url);
+    loginUrl.searchParams.set('callbackUrl', pathname);
+    return NextResponse.redirect(loginUrl);
   }
 
-  // --- Fumadocs proxy: rewrite docs URLs ---
-  const result = rewriteSuffix(request.nextUrl.pathname);
-  if (result) {
-    return NextResponse.rewrite(new URL(result, request.nextUrl));
+  // Redirect authenticated users away from login/signup.
+  if (session && AUTH_ONLY_ROUTES.includes(pathname)) {
+    return NextResponse.redirect(new URL('/playground', request.url));
   }
 
+  // Fumadocs: rewrite .md URLs.
+  const suffixResult = rewriteSuffix(pathname);
+
+  if (suffixResult) {
+    return NextResponse.rewrite(new URL(suffixResult, request.nextUrl));
+  }
+
+  // Fumadocs: rewrite markdown-preferred requests.
   if (isMarkdownPreferred(request)) {
-    const result = rewriteDocs(request.nextUrl.pathname);
+    const docsResult = rewriteDocs(pathname);
 
-    if (result) {
-      return NextResponse.rewrite(new URL(result, request.nextUrl), {
+    if (docsResult) {
+      return NextResponse.rewrite(new URL(docsResult, request.nextUrl), {
         headers: { Vary: 'Accept' },
       });
     }

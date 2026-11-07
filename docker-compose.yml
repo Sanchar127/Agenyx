@@ -42,7 +42,7 @@ services:
   # PostgreSQL - durable Agent execution storage
   # ─────────────────────────────────────────────
   postgres:
-    image: postgres:17-alpine
+    image: pgvector/pgvector:pg17
 
     container_name: agenyx-postgres
 
@@ -53,6 +53,7 @@ services:
 
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
 
     ports:
       - "5432:5432"
@@ -170,6 +171,7 @@ services:
       AGENTYX_TASK_STREAM: agenyx:tasks
       AGENTYX_CONSUMER_GROUP: agenyx-workers
       AGENTYX_AGENT_URL: http://agent:8000
+      INFERENCE_URL: http://inference:8004
 
     depends_on:
       - valkey
