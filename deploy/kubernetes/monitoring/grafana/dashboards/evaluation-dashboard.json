@@ -1,0 +1,624 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Agenyx Evaluation Platform metrics dashboard",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "min": 0,
+          "unit": "req/s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(evaluation_requests_total[5m])",
+          "instant": false,
+          "legendFormat": "{{endpoint}} {{method}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evaluation Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.50, rate(evaluation_requests_duration_seconds_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p50 {{endpoint}} {{method}}",
+          "refId": "A"
+        },
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.95, rate(evaluation_requests_duration_seconds_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p95 {{endpoint}} {{method}}",
+          "refId": "B"
+        },
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.99, rate(evaluation_requests_duration_seconds_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p99 {{endpoint}} {{method}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Evaluation Request Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(evaluation_job_duration_seconds_bucket[5m])",
+          "instant": false,
+          "legendFormat": "{{evaluation_type}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evaluation Job Duration",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 4,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(evaluation_requests_total{status=\"500\"}[5m]) / rate(evaluation_requests_total[5m])",
+          "instant": false,
+          "legendFormat": "Error rate {{endpoint}} {{method}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evaluation Error Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "evaluation_workers_total",
+          "instant": false,
+          "legendFormat": "{{worker_type}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Evaluation Workers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(evaluation_comparisons_created_total[5m])",
+          "instant": false,
+          "legendFormat": "comparisons created",
+          "refId": "A"
+        }
+      ],
+      "title": "Comparisons Created",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "unit": "count"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(evaluation_rag_requests_total[5m])",
+          "instant": false,
+          "legendFormat": "{{endpoint}} {{status}}",
+          "refId": "A"
+        }
+      ],
+      "title": "RAG Request Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.50, rate(evaluation_rag_chunks_retrieved_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p50 chunks {{endpoint}}",
+          "refId": "A"
+        },
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.95, rate(evaluation_rag_chunks_retrieved_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p95 chunks {{endpoint}}",
+          "refId": "B"
+        }
+      ],
+      "title": "RAG Chunks Retrieved",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showValues": true,
+          "sortOrder": "descending",
+          "sortBy": "Last",
+          "reduceOptions": {
+            "values": false,
+            "calcs": [
+              "last",
+              "mean",
+              "max",
+              "min"
+            ],
+            "fields": "",
+            "limit": 5,
+            "threshold": "2"
+          }
+        },
+        "orientation": "vertical",
+        "textMode": "value",
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.50, rate(evaluation_rag_context_chars_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p50 context chars {{endpoint}}",
+          "refId": "A"
+        },
+        {
+          "exemplar": true,
+          "expr": "histogram_quantile(0.95, rate(evaluation_rag_context_chars_bucket[5m]))",
+          "instant": false,
+          "legendFormat": "p95 context chars {{endpoint}}",
+          "refId": "B"
+        }
+      ],
+      "title": "RAG Context Characters",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "id": 10,
+      "options": {
+        "code": {},
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": "",
+          "limit": 5
+        },
+        "showValue": "current",
+        "orientation": "vertical",
+        "type": "stat"
+      },
+      "targets": [
+        {
+          "exemplar": true,
+          "expr": "rate(evaluation_requests_total[5m])",
+          "instant": false,
+          "legendFormat": "Total RPS",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Evaluation RPS",
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 38,
+  "tags": [],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "",
+  "title": "Agenyx Evaluation Platform",
+  "uid": "evaluation-dashboard",
+  "version": 1,
+  "weekStart": ""
+}
