@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ──────────────────────────────────────────────────────────────────────
+# Agenyx — single consolidated production deployment
+#
+# All Agenyx platform services are declared here in one place instead of
+# per-component directories. This makes the stack easier to review, apply,
+# and operate as a single production unit.
+#
+# Applied after the `agenyx` namespace exists (see deploy/kubernetes/namespace.yaml).
+# ──────────────────────────────────────────────────────────────────────
+
+namespace: agenyx
+
+resources:
+  - configmaps.yaml
+  - secrets.yaml
+  - serviceaccounts.yaml
+  - services.yaml
+  - servicemonitors.yaml
+  - deployments.yaml
+  - statefulsets.yaml
+  - hpametrics.yaml
+  - pdbs.yaml
+  - networkpolicies.yaml
+  - prometheusrules.yaml
+
+# Common labels applied to every resource for consistent selection,
+# dashboards, alerting, and cost allocation.
+commonLabels:
+  app.kubernetes.io/part-of: agenyx
+  app.kubernetes.io/managed-by: kustomize
+  environment: production
+
+commonAnnotations:
+  app.kubernetes.io/component: platform

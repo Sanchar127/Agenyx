@@ -1,0 +1,131 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-agent
+  labels:
+    app.kubernetes.io/name: agenyx-agent
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-agent
+  namespaceSelector:
+    matchNames:
+      - agenyx
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-inference
+  labels:
+    app.kubernetes.io/name: agenyx-inference
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-inference
+  namespaceSelector:
+    matchNames:
+      - agenyx
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-router
+  labels:
+    app.kubernetes.io/name: agenyx-router
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-router
+  namespaceSelector:
+    matchNames:
+      - agenyx
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-orchestrator
+  labels:
+    app.kubernetes.io/name: agenyx-orchestrator
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-orchestrator
+  namespaceSelector:
+    matchNames:
+      - agenyx
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-worker
+  labels:
+    app.kubernetes.io/name: agenyx-worker
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-worker
+  namespaceSelector:
+    matchNames:
+      - agenyx
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: agenyx-valkey
+  labels:
+    app.kubernetes.io/name: valkey
+    app.kubernetes.io/part-of: agenyx
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: valkey
+  namespaceSelector:
+    matchNames:
+      - agenyx
+  endpoints:
+    - port: redis
+      path: /metrics
+      scheme: http
+      interval: 15s
+      scrapeTimeout: 10s

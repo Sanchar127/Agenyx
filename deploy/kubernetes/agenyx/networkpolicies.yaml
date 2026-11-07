@@ -1,0 +1,250 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-agent
+  labels:
+    app.kubernetes.io/name: agenyx-agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from other Agenyx components.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Agenyx internal services.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8005  # router
+        - protocol: TCP
+          port: 8004  # inference
+        - protocol: TCP
+          port: 8002  # orchestrator
+        - protocol: TCP
+          port: 8003  # worker
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-inference
+  labels:
+    app.kubernetes.io/name: agenyx-inference
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-inference
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8004
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Ollama on the host.
+    - to:
+        - ipBlock:
+            cidr: 192.168.100.65/32
+      ports:
+        - protocol: TCP
+          port: 11434
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-router
+  labels:
+    app.kubernetes.io/name: agenyx-router
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-router
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8005
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Valkey.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-orchestrator
+  labels:
+    app.kubernetes.io/name: agenyx-orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-orchestrator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8002
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Agenyx internal services.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8000  # agent
+        - protocol: TCP
+          port: 8005  # router
+        - protocol: TCP
+          port: 8003  # worker
+    # Valkey.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-worker
+  labels:
+    app.kubernetes.io/name: agenyx-worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agenyx-worker
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8003
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Agent + Valkey.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 8000  # agent
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: valkey
+      ports:
+        - protocol: TCP
+          port: 6379
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agenyx-valkey
+  labels:
+    app.kubernetes.io/name: valkey
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: valkey
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: agenyx
+      ports:
+        - protocol: TCP
+          port: 6379
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
