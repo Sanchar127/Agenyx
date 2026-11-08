@@ -15,7 +15,7 @@ type Manager struct {
 // NewManager creates a Guardrail Manager with the given providers.
 func NewManager(providers []Provider, failClosed bool) *Manager {
 	return &Manager{
-		providers: providers,
+		providers:  providers,
 		failClosed: failClosed,
 	}
 }

@@ -16,7 +16,7 @@ const (
 	// to "true". Credentials are incompatible with the "*" origin.
 	corsCredentialsEnv = "AGENEYX_CORS_ALLOW_CREDENTIALS"
 
-	corsMaxAge           = "86400"
+	corsMaxAge            = "86400"
 	defaultAllowedMethods = "GET, POST, OPTIONS"
 	defaultAllowedHeaders = "Content-Type, Authorization"
 	defaultExposedHeaders = "X-Request-ID"

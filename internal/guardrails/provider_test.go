@@ -16,8 +16,8 @@ func TestKeywordProviderBlocksKeyword(t *testing.T) {
 	p := NewKeywordProvider("secrets", []string{"password", "secret", "token"}, 0.8)
 
 	tests := []struct {
-		name     string
-		text     string
+		name      string
+		text      string
 		wantBlock bool
 	}{
 		{"contains password", "my password is 123", true},

@@ -223,9 +223,9 @@ func newGatewayServer(
 		}
 
 		var req struct {
-			Code         string `json:"code"`
-			ClientID     string `json:"client_id"`
-			RedirectURI  string `json:"redirect_uri"`
+			Code        string `json:"code"`
+			ClientID    string `json:"client_id"`
+			RedirectURI string `json:"redirect_uri"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{
@@ -270,10 +270,10 @@ func newGatewayServer(
 		writeSessionCookie(w, sessionToken, secure)
 
 		writeJSON(w, http.StatusOK, map[string]string{
-			"status":  "authenticated",
+			"status":   "authenticated",
 			"provider": provider,
-			"email":   email,
-			"name":    name,
+			"email":    email,
+			"name":     name,
 		})
 	})
 
@@ -290,6 +290,13 @@ func newGatewayServer(
 		return nil, err
 	}
 
+	// Guardrails run after authentication/authorization, immediately before
+	// the agent execution handler. Configured via AGENEYX_GUARDRAILS_* env vars.
+	gm, err := newGuardrailsMiddlewareFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("initialize guardrails middleware: %w", err)
+	}
+
 	handler := chain(
 		mux,
 		corsMiddleware,
@@ -300,6 +307,7 @@ func newGatewayServer(
 		limiter.MiddlewareWithClientIP(resolveClientIP),
 		apiKeyAuthMiddleware(apiKey),
 		authorizationMiddleware(permissions),
+		gm.handle,
 	)
 
 	return &GatewayServer{handler: handler}, nil

@@ -30,13 +30,13 @@ type SessionStore struct {
 
 // Session represents an authenticated user session.
 type Session struct {
-	Token      string
-	Provider   string
-	Subject    string // The OAuth provider's subject/user ID
-	Email      string
-	Name       string
-	CreatedAt  time.Time
-	ExpiresAt  time.Time
+	Token     string
+	Provider  string
+	Subject   string // The OAuth provider's subject/user ID
+	Email     string
+	Name      string
+	CreatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // NewSessionStore creates a session store with the given TTL.
@@ -74,13 +74,13 @@ func (s *SessionStore) Create(provider, subject, email, name string) string {
 	token := s.newToken()
 
 	session := &Session{
-		Token:      token,
-		Provider:   provider,
-		Subject:    subject,
-		Email:      email,
-		Name:       name,
-		CreatedAt:  time.Now(),
-		ExpiresAt:  time.Now().Add(s.sessionTTL),
+		Token:     token,
+		Provider:  provider,
+		Subject:   subject,
+		Email:     email,
+		Name:      name,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(s.sessionTTL),
 	}
 
 	s.mu.Lock()
@@ -126,12 +126,12 @@ func (s *SessionStore) newToken() string {
 
 // oauthProviderConfig holds the OAuth endpoints for a provider.
 type oauthProviderConfig struct {
-	tokenURL        string
-	userInfoURL     string
-	clientID        string
-	clientSecret    string
-	scopes          string
-	authStyle       string // "query" or "body" for client credentials
+	tokenURL     string
+	userInfoURL  string
+	clientID     string
+	clientSecret string
+	scopes       string
+	authStyle    string // "query" or "body" for client credentials
 }
 
 // oauthProviders holds the configured OAuth providers.

@@ -23,10 +23,10 @@ type Result struct {
 
 // Config holds configuration for a single guardrail provider.
 type Config struct {
-	Name      string            `json:"name"`
-	Enabled   bool              `json:"enabled"`
-	Threshold float64           `json:"threshold"` // 0.0-1.0, confidence threshold for block
-	Params    map[string]any    `json:"params,omitempty"`
+	Name      string         `json:"name"`
+	Enabled   bool           `json:"enabled"`
+	Threshold float64        `json:"threshold"` // 0.0-1.0, confidence threshold for block
+	Params    map[string]any `json:"params,omitempty"`
 }
 
 // ServiceConfig is the top-level guardrail configuration.
