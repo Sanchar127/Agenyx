@@ -1,0 +1,138 @@
+---
+title: Benchmark Engine
+description: Go-based benchmarking engine for Agenyx — runtime, throughput, latency, concurrency, reliability, and resource benchmarks with pgvector, pgvector, pgvector...
+---
+
+# Benchmark Engine
+
+## Objective
+
+The benchmark engine provides production-grade performance testing for the Agenyx runtime. It measures:
+
+- **Request throughput** (requests per second)
+- **Latency percentiles** (p50, p95, p99)
+- **Error rates** and success rates
+- **Concurrency handling** under load
+- **Resource utilization** (CPU, memory)
+- **Reliability** under stress conditions
+
+## Architecture
+
+The benchmark engine consists of:
+
+1. **Benchmark types** (`internal/eval/benchmark/types.go`) — Core data models for benchmarks, runs, results, and metrics
+2. **Metrics collector** (`internal/eval/benchmark/metrics.go`) — Latency histograms, throughput counters, percentile calculations
+3. **Registry** (`internal/eval/benchmark/registry.go`) — Pluggable benchmark runner registration
+4. **HTTP runner** (`internal/eval/benchmark/runner.go`) — Async concurrent HTTP benchmark execution
+5. **Runtime runners** (`internal/eval/benchmark/runtime/`) — Agenyx-specific benchmarks for gateway, inference, and agent services
+
+## Benchmark Types
+
+| Type | Description |
+|------|-------------|
+| `runtime` | General runtime performance |
+| `throughput` | Requests per second under load |
+| `latency` | Response latency distribution |
+| `concurrency` | Concurrent request handling |
+| `reliability` | Error rate and recovery |
+| `resource` | CPU, memory, GPU utilization |
+
+## Metrics
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| `rps` | req/s | Requests per second |
+| `p50_latency_ms` | ms | 50th percentile latency |
+| `p95_latency_ms` | ms | 95th percentile latency |
+| `p99_latency_ms` | ms | 99th percentile latency |
+| `max_latency_ms` | ms | Maximum latency |
+| `min_latency_ms` | ms | Minimum latency |
+| `avg_latency_ms` | ms | Average latency |
+| `error_rate` | percent | Error rate (0-100%) |
+| `cpu_utilization` | percent | CPU usage |
+| `memory_utilization` | percent | Memory usage |
+| `gpu_utilization` | percent | GPU usage |
+| `network_io_bytes` | bytes | Network I/O |
+| `disk_io_bytes` | bytes | Disk I/O |
+
+## Runners
+
+### HTTPRunner
+
+The base runner executes HTTP-based benchmarks with configurable concurrency:
+
+```go
+runner := benchmark.NewHTTPRunner(store, timeoutSeconds)
+run, err := runner.Run(ctx, config)
+```
+
+Each runner spawns `concurrency` goroutines that continuously send requests for the specified duration, collecting latency and throughput metrics.
+
+### GatewayBenchmarkRunner
+
+Benchmarks the Agenyx API Gateway:
+
+```go
+runner := runtime.NewGatewayBenchmarkRunner(store, "http://gateway:443", 5)
+
+// Health check benchmark
+run, err := runner.RunHealthBenchmark(ctx, config)
+
+// Agent run benchmark
+run, err := runner.RunAgentRunBenchmark(ctx, config, "Analyze this document")
+```
+
+### InferenceBenchmarkRunner
+
+Benchmarks the LLM Inference Service:
+
+```go
+runner := runtime.NewInferenceBenchmarkRunner(store, "http://inference:8004", 5)
+
+run, err := runner.RunChatCompletionBenchmark(ctx, config, "qwen2.5:7b", "What is Agenyx?")
+```
+
+### AgentBenchmarkRunner
+
+Benchmarks the Agent Service:
+
+```go
+runner := runtime.NewAgentBenchmarkRunner(store, "http://agent:8000", 5)
+
+run, err := runner.RunAgentIntentBenchmark(ctx, config, "Summarize this document")
+```
+
+## Running Benchmarks
+
+Benchmarks are initiated through the Evaluation API:
+
+```bash
+POST /api/v1/eval/benchmarks
+{
+  "name": "runtime-throughput-v1",
+  "benchmark_type": "runtime",
+  "target_service": "inference",
+  "target_url": "http://inference:8004",
+  "concurrency_levels": [10, 50, 100],
+  "duration_seconds": 300,
+  "metrics": ["rps", "p50_latency", "p95_latency", "p99_latency", "error_rate"]
+}
+```
+
+Results are stored in PostgreSQL and accessible via:
+
+```bash
+GET /api/v1/eval/benchmarks/{id}
+GET /api/v1/eval/runs/{run_id}/results
+```
+
+## Test Coverage
+
+| Test | Description |
+|------|-------------|
+| TestLatencyMetrics | Percentile calculations (p50, p95, p99) |
+| TestThroughputMetrics | RPS, error rate, success rate |
+| TestThroughputMetricsAggregate | Metric aggregation across workers |
+| TestHTTPRunner | End-to-end HTTP benchmark execution |
+| TestHTTPRunnerErrorHandling | Error rate tracking with failing endpoints |
+| TestRegisteredTypes | Benchmark type registration |

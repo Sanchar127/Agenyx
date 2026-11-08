@@ -1,0 +1,321 @@
+---
+title: Evaluation API Specification
+description: REST API contracts for the Agenyx Evaluation Platform — asynchronous job lifecycle, models, datasets, benchmarks, comparisons, and artifacts.
+---
+
+# Evaluation API Specification
+
+## Base Path
+
+All evaluation endpoints are served under `/api/v1/eval`.
+
+The evaluation API runs on a **separate port (8006)** and is operationally isolated from production endpoints.
+
+## Authentication
+
+All endpoints require an API key via the `X-Agenyx-API-Key` header or `Authorization: Bearer <token>`.
+
+Role-based access control:
+- `eval:read` — view evaluations, runs, results, comparisons
+- `eval:write` — create evaluations, benchmarks, datasets, models
+- `eval:admin` — manage workers, scheduler, system config
+
+## Endpoints
+
+### Evaluations
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| POST | `/api/v1/eval/evaluations` | Create an evaluation job | `eval:write` |
+| GET | `/api/v1/eval/evaluations` | List evaluations (paginated) | `eval:read` |
+| GET | `/api/v1/eval/evaluations/{id}` | Get evaluation details | `eval:read` |
+| POST | `/api/v1/eval/evaluations/{id}/cancel` | Cancel an evaluation | `eval:write` |
+| DELETE | `/api/v1/eval/evaluations/{id}` | Delete an evaluation | `eval:admin` |
+
+### Evaluation Runs
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/v1/eval/runs/{run_id}` | Get run status and results | `eval:read` |
+| GET | `/api/v1/eval/runs/{run_id}/results` | Get detailed scores | `eval:read` |
+| GET | `/api/v1/eval/runs/{run_id}/artifacts` | List artifacts (traces, logs) | `eval:read` |
+| GET | `/api/v1/eval/runs/{run_id}/logs` | Stream execution logs | `eval:read` |
+
+### Benchmarks
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| POST | `/api/v1/eval/benchmarks` | Create a benchmark job | `eval:write` |
+| GET | `/api/v1/eval/benchmarks` | List benchmarks (paginated) | `eval:read` |
+| GET | `/api/v1/eval/benchmarks/{id}` | Get benchmark details | `eval:read` |
+
+### Comparisons
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| POST | `/api/v1/eval/comparisons` | Create model/runtime comparison | `eval:write` |
+| GET | `/api/v1/eval/comparisons/{id}` | Get comparison report | `eval:read` |
+
+### Models
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/v1/eval/models` | List registered models | `eval:read` |
+| POST | `/api/v1/eval/models` | Register a new model | `eval:write` |
+| GET | `/api/v1/eval/models/{id}` | Get model details | `eval:read` |
+
+### Providers
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/v1/eval/providers` | List registered providers | `eval:read` |
+| POST | `/api/v1/eval/providers` | Register a new provider | `eval:write` |
+
+### Datasets
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/v1/eval/datasets` | List datasets | `eval:read` |
+| POST | `/api/v1/eval/datasets` | Upload/register a dataset | `eval:write` |
+| GET | `/api/v1/eval/datasets/{id}` | Get dataset details | `eval:read` |
+
+### Workers
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/v1/eval/workers` | List worker status | `eval:read` |
+| GET | `/api/v1/eval/workers/{id}` | Get worker health | `eval:read` |
+
+### Health
+
+| Method | Path | Description | Auth |
+|--------|------|-------------|------|
+| GET | `/api/v1/eval/health` | Liveness probe | None |
+| GET | `/api/v1/eval/ready` | Readiness probe | None |
+| GET | `/api/v1/eval/metrics` | Prometheus metrics | None |
+
+## Request / Response Schemas
+
+### Create Evaluation
+
+**Request** `POST /api/v1/eval/evaluations`
+
+```json
+{
+  "name": "agent-tool-use-v1",
+  "description": "Evaluate tool calling accuracy across models",
+  "dataset_id": "ds-agent-tool-use-001",
+  "models": [
+    {
+      "model_id": "qwen2.5:7b",
+      "provider_id": "ollama-local",
+      "generation_params": {
+        "temperature": 0.2,
+        "max_tokens": 1000
+      }
+    },
+    {
+      "model_id": "llama-3.1-8b",
+      "provider_id": "vllm-local",
+      "generation_params": {
+        "temperature": 0.2,
+        "max_tokens": 1000
+      }
+    }
+  ],
+  "evaluation_type": "agent",
+  "scorers": ["task_completion", "tool_selection_accuracy"],
+  "priority": "normal",
+  "timeout_seconds": 3600,
+  "max_concurrency": 5,
+  "metadata": {
+    "owner": "platform-team",
+    "ticket": "ENG-123"
+  }
+}
+```
+
+**Response** `202 Accepted`
+
+```json
+{
+  "evaluation_id": "eval-550e8400-e29b-41d4-a716-446655440000",
+  "status": "queued",
+  "created_at": "2026-11-07T16:45:00Z",
+  "estimated_duration_seconds": 1800
+}
+```
+
+### Get Evaluation
+
+**Request** `GET /api/v1/eval/evaluations/{id}`
+
+**Response** `200 OK`
+
+```json
+{
+  "evaluation_id": "eval-550e8400-e29b-41d4-a716-446655440000",
+  "name": "agent-tool-use-v1",
+  "status": "completed",
+  "progress": 100,
+  "created_at": "2026-11-07T16:45:00Z",
+  "completed_at": "2026-11-07T17:15:00Z",
+  "runs": [
+    {
+      "run_id": "run-abc123",
+      "model_id": "qwen2.5:7b",
+      "provider_id": "ollama-local",
+      "status": "completed",
+      "success_rate": 0.92,
+      "avg_latency_ms": 1250
+    },
+    {
+      "run_id": "run-def456",
+      "model_id": "llama-3.1-8b",
+      "provider_id": "vllm-local",
+      "status": "completed",
+      "success_rate": 0.88,
+      "avg_latency_ms": 980
+    }
+  ],
+  "comparison_available": true
+}
+```
+
+### List Evaluations
+
+**Request** `GET /api/v1/eval/evaluations?page=1&page_size=20&status=completed`
+
+**Response** `200 OK`
+
+```json
+{
+  "evaluations": [...],
+  "pagination": {
+    "page": 1,
+    "page_size": 20,
+    "total": 150,
+    "has_more": true
+  }
+}
+```
+
+### Register Model
+
+**Request** `POST /api/v1/eval/models`
+
+```json
+{
+  "model_id": "qwen2.5:7b",
+  "provider_id": "ollama-local",
+  "display_name": "Qwen 2.5 7B",
+  "context_window": 32768,
+  "capabilities": ["chat", "tool_use", "json_mode"],
+  "endpoint_config": {
+    "base_url": "http://ollama:11434/v1",
+    "api_key_ref": "ollama-api-key"
+  },
+  "generation_defaults": {
+    "temperature": 0.2,
+    "max_tokens": 1000
+  },
+  "timeout_seconds": 120,
+  "retry_config": {
+    "max_retries": 3,
+    "base_delay_seconds": 2
+  }
+}
+```
+
+**Response** `201 Created`
+
+```json
+{
+  "model_id": "qwen2.5:7b",
+  "provider_id": "ollama-local",
+  "status": "registered",
+  "health": "unknown",
+  "created_at": "2026-11-07T16:45:00Z"
+}
+```
+
+### Create Benchmark
+
+**Request** `POST /api/v1/eval/benchmarks`
+
+```json
+{
+  "name": "runtime-throughput-v1",
+  "description": "Measure Agenyx gateway throughput under load",
+  "benchmark_type": "runtime",
+  "target_service": "inference",
+  "target_url": "http://inference:8004",
+  "concurrency_levels": [10, 50, 100, 200],
+  "duration_seconds": 300,
+  "ramp_up_seconds": 60,
+  "metrics": ["rps", "p50_latency", "p95_latency", "p99_latency", "error_rate"],
+  "priority": "normal"
+}
+```
+
+### Create Comparison
+
+**Request** `POST /api/v1/eval/comparisons`
+
+```json
+{
+  "name": "qwen-vs-llama-tool-use",
+  "run_ids": ["run-abc123", "run-def456"],
+  "metrics": ["success_rate", "avg_latency_ms", "tool_selection_accuracy"],
+  "statistical_significance": true
+}
+```
+
+**Response** `200 OK`
+
+```json
+{
+  "comparison_id": "comp-xyz789",
+  "status": "completed",
+  "results": {
+    "success_rate": {
+      "run-abc123": 0.92,
+      "run-def456": 0.88,
+      "difference": 0.04,
+      "significant": true
+    },
+    "avg_latency_ms": {
+      "run-abc123": 1250,
+      "run-def456": 980,
+      "difference": -270,
+      "significant": true
+    }
+  },
+  "report_url": "/api/v1/eval/comparisons/comp-xyz789/report"
+}
+```
+
+## Error Codes
+
+| Code | HTTP | Meaning |
+|------|------|---------|
+| `EVAL_INVALID_REQUEST` | 400 | Request validation failed |
+| `EVAL_UNAUTHORIZED` | 401 | Missing or invalid API key |
+| `EVAL_FORBIDDEN` | 403 | Insufficient permissions |
+| `EVAL_NOT_FOUND` | 404 | Evaluation, run, or resource not found |
+| `EVAL_ALREADY_EXISTS` | 409 | Duplicate model, provider, or dataset |
+| `EVAL_JOB_QUEUE_FULL` | 503 | Evaluation worker queue at capacity |
+| `EVAL_INTERNAL_ERROR` | 500 | Internal server error |
+| `EVAL_SERVICE_UNAVAILABLE` | 503 | Evaluation service temporarily unavailable |
+
+## Pagination
+
+List endpoints support `page` and `page_size` query parameters (max page_size: 100).
+
+## Filtering
+
+List endpoints support `status`, `model_id`, `provider_id`, `evaluation_type`, and `created_after`/`created_before` filters.
+
+## API Versioning
+
+The API is versioned in the URL path (`/api/v1/eval`). Breaking changes introduce a new version (e.g., `/api/v2/eval`) while maintaining backward compatibility for one release cycle.

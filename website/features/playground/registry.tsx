@@ -6,6 +6,7 @@ import {
   BrainCircuit,
   Bot,
   Cpu,
+  Document,
   FlaskConical,
   Sparkles,
   Telescope,
@@ -14,6 +15,7 @@ import {
 } from 'lucide-react';
 
 import { ChatTool } from './tools/chat-tool';
+import { RagDashboard } from './tools/rag-dashboard';
 import { ComingSoon } from './coming-soon';
 
 export interface PlaygroundToolDefinition {
@@ -30,6 +32,14 @@ const CHAT_TOOL: PlaygroundToolDefinition = {
   description: 'Chat with an Agenyx agent',
   icon: Bot,
   component: ChatTool,
+};
+
+const RAG_DASHBOARD: PlaygroundToolDefinition = {
+  id: 'rag-dashboard',
+  name: 'RAG Pipeline',
+  description: 'Retrieval-Augmented Generation pipeline',
+  icon: Document,
+  component: RagDashboard,
 };
 
 const FUTURE_TOOLS: PlaygroundToolDefinition[] = [
@@ -66,7 +76,7 @@ const FUTURE_TOOLS: PlaygroundToolDefinition[] = [
 ];
 
 export const playgroundTools: PlaygroundToolDefinition[] =
-  [CHAT_TOOL, ...FUTURE_TOOLS];
+  [CHAT_TOOL, RAG_DASHBOARD, ...FUTURE_TOOLS];
 
 const toolMap = new Map<string, PlaygroundToolDefinition>(
   playgroundTools.map((tool) => [tool.id, tool]),

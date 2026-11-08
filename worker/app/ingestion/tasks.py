@@ -8,6 +8,7 @@ upserts to the pgvector store.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import time
@@ -53,7 +54,7 @@ class IngestTaskHandler:
             },
         )
 
-    async def _update_state(
+    def _update_state(
         self,
         execution_id: str,
         *,
@@ -93,15 +94,24 @@ class IngestTaskHandler:
             metadata = json.loads(metadata_raw) if isinstance(metadata_raw, str) else metadata_raw or {}
         except (json.JSONDecodeError, TypeError):
             metadata = {}
+        import logging
+        log = logging.getLogger(__name__)
+        log.info(
+            "Ingest handler: execution_id=%s document_id=%s content_len=%d metadata=%s",
+            execution_id,
+            document_id,
+            len(content),
+            metadata,
+        )
 
         if not document_id:
             document_id = self._digest(content)
 
         if not content.strip():
             logger.warning(
-                "ingestion_empty_content",
-                message_id=message_id,
-                document_id=document_id,
+                "ingestion_empty_content message_id=%s document_id=%s",
+                message_id,
+                document_id,
             )
             self._update_state(
                 execution_id,
@@ -111,10 +121,10 @@ class IngestTaskHandler:
             return
 
         logger.info(
-            "ingestion_started",
-            message_id=message_id,
-            document_id=document_id,
-            content_bytes=len(content),
+            "ingestion_started message_id=%s document_id=%s content_bytes=%d",
+            message_id,
+            document_id,
+            len(content),
         )
 
         start = time.perf_counter()
@@ -169,18 +179,18 @@ class IngestTaskHandler:
             )
 
             logger.info(
-                "ingestion_completed",
-                message_id=message_id,
-                document_id=document_id,
-                chunks=len(embedded_chunks),
-                duration_ms=duration_ms,
+                "ingestion_completed message_id=%s document_id=%s chunks=%d duration_ms=%d",
+                message_id,
+                document_id,
+                len(embedded_chunks),
+                duration_ms,
             )
 
         except Exception:
             logger.exception(
-                "ingestion_failed",
-                message_id=message_id,
-                document_id=document_id,
+                "ingestion_failed message_id=%s document_id=%s",
+                message_id,
+                document_id,
             )
             raise
 

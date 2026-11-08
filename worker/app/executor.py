@@ -87,7 +87,6 @@ class TaskExecutor:
                 return
 
             result = await self.agent_client.run(intent)
-
         except asyncio.CancelledError:
             raise
 

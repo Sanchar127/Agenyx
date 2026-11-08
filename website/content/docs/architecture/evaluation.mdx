@@ -1,0 +1,191 @@
+---
+title: Evaluation Architecture
+description: Component responsibility diagram, execution boundaries, and infrastructure map for the Agenyx Evaluation Platform.
+---
+
+# Evaluation Architecture
+
+## Component Responsibility Diagram
+
+```mermaid
+graph LR
+    subgraph API [Evaluation API Layer]
+        API1[REST API<br/>/api/v1/eval]
+        API2[Auth + RBAC]
+        API3[Validation + Pagination]
+    end
+
+    subgraph SCHED [Evaluation Scheduler]
+        S1[Job Scheduler]
+        S2[Execution Planner]
+        S3[Lease Manager]
+    end
+
+    subgraph QUEUE [Job Queue]
+        Q1[Valkey Streams<br/>eval:jobs]
+        Q2[Consumer Groups<br/>eval-workers]
+    end
+
+    subgraph AI_WORKERS [AI Evaluation Workers - Python]
+        AW1[Inspect AI Runner]
+        AW2[Provider Adapters<br/>Ollama, vLLM, OpenAI, Anthropic]
+        AW3[Custom Scorers]
+        AW4[Dataset Loader]
+    end
+
+    subgraph BENCH_WORKERS [Benchmark Workers - Go]
+        BW1[Runtime Benchmarks]
+        BW2[Throughput Benchmarks]
+        BW3[Latency Benchmarks]
+        BW4[Concurrency Benchmarks]
+        BW5[Reliability Benchmarks]
+        BW6[Resource Benchmarks]
+    end
+
+    subgraph LOAD [Load Testing - k6]
+        L1[HTTP Load Tests]
+        L2[Stress / Spike / Soak]
+    end
+
+    subgraph STORAGE [Storage Layer]
+        PG1[PostgreSQL<br/>Eval Metadata & Results]
+        S3_1[S3-compatible<br/>Datasets & Artifacts]
+    end
+
+    subgraph OBS [Observability]
+        O1[Prometheus Metrics]
+        O2[OpenTelemetry Traces]
+        O3[Grafana Dashboards]
+    end
+
+    API1 -->|enqueue| Q1
+    S1 -->|dequeue| Q1
+    S1 -->|assign| AW1
+    S1 -->|assign| BW1
+    S1 -->|assign| L1
+    AW1 -->|results| PG1
+    BW1 -->|results| PG1
+    L1 -->|results| PG1
+    AW1 -->|artifacts| S3_1
+    API1 -->|query| PG1
+    O1 -.->|scrape| API1
+    O1 -.->|scrape| S1
+    O1 -.->|scrape| AW1
+    O1 -.->|scrape| BW1
+
+    classDef api fill:#e1f5fe,stroke:#01579b;
+    classDef sched fill:#fff3e0,stroke:#e65100;
+    classDef worker fill:#fce4ec,stroke:#880e4f;
+    classDef storage fill:#f3e5f5,stroke:#4a148c;
+    classDef obs fill:#e8f5e9,stroke:#2e7d32;
+
+    class API1,API2,API3 api;
+    class S1,S2,S3 sched;
+    class AW1,AW2,AW3,AW4,BW1,BW2,BW3,BW4,BW5,BW6,L1,L2 worker;
+    class PG1,S3_1 storage;
+    class O1,O2,O3 obs;
+```
+
+## Execution Boundaries
+
+| Boundary | Responsibility | Isolation Mechanism |
+|----------|---------------|---------------------|
+| **Evaluation API** | Request ingress, auth, validation | Separate HTTP server (port 8006) |
+| **Evaluation Scheduler** | Job planning, queue management | Separate process, own Valkey consumer group |
+| **AI Evaluation Workers** | Inspect AI execution | Docker containers, CPU/memory limits |
+| **Benchmark Workers** | Go benchmark execution | Docker containers, CPU/memory limits |
+| **Load Testing Workers** | k6 load generation | Separate network namespace |
+| **Production Path** | Agent execution, LLM inference | **Completely separate** queues and workers |
+
+## Infrastructure Map
+
+```mermaid
+graph TB
+    subgraph Production [Production Data Plane]
+        AGENT[Agent Service<br/>Port 8000]
+        INF[Inference Service<br/>Port 8004]
+        GW[Gateway<br/>Port 443]
+        W[Task Worker]
+    end
+
+    subgraph Evaluation [Evaluation Plane]
+        EAPI[Evaluation API<br/>Port 8006]
+        ESCHED[Evaluation Scheduler<br/>Port 8007]
+        EAW[AI Eval Workers<br/>Python]
+        EBW[Benchmark Workers<br/>Go]
+        EK6[k6 Load Tests]
+    end
+
+    subgraph Shared [Shared Infrastructure]
+        PG[(PostgreSQL<br/>+ pgvector)]
+        VK[(Valkey<br/>Job Queues)]
+        S3[(S3-compatible<br/>Artifacts)]
+    end
+
+    subgraph Client [Client Access]
+        UI[Evaluation Dashboard]
+        CLI[Agenyx CLI]
+        API[REST API Client]
+    end
+
+    UI --> EAPI
+    CLI --> EAPI
+    API --> EAPI
+    EAPI --> PG
+    ESCHED --> VK
+    EAW --> PG
+    EAW --> S3
+    EBW --> PG
+    EK6 --> PG
+
+    classDef prod fill:#fff3e0,stroke:#e65100;
+    classDef eval fill:#e1f5fe,stroke:#01579b;
+    classDef shared fill:#f3e5f5,stroke:#4a148c;
+    classDef client fill:#fce4ec,stroke:#880e4f;
+
+    class AGENT,INF,GW,W prod;
+    class EAPI,ESCHED,EAW,EBW,EK6 eval;
+    class PG,VK,S3 shared;
+    class UI,CLI,API client;
+```
+
+## Worker Pool Architecture
+
+```
+Worker Pools (independently scalable):
+
+┌─────────────────────────────────────────────────────────────┐
+│  AI Evaluation Worker Pool (Python)                         │
+│  ├── Concurrency: 4 workers                                 │
+│  ├── CPU limit: 2 cores per worker                          │
+│  ├── Memory limit: 4Gi per worker                           │
+│  ├── Queue: eval:workers:ai                                  │
+│  └── Workloads: LLM eval, agent eval, tool eval             │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  Benchmark Worker Pool (Go)                                 │
+│  ├── Concurrency: 2 workers                                 │
+│  ├── CPU limit: 4 cores per worker                          │
+│  ├── Memory limit: 8Gi per worker                           │
+│  ├── Queue: eval:workers:bench                              │
+│  └── Workloads: runtime, throughput, latency benchmarks     │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  Load Test Worker Pool (k6)                                 │
+│  ├── Concurrency: 1 worker                                  │
+│  ├── CPU limit: 2 cores                                     │
+│  ├── Memory limit: 2Gi                                      │
+│  ├── Queue: eval:workers:loadtest                            │
+│  └── Workloads: stress, spike, soak tests                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Resource Isolation
+
+- Evaluation workers run in **separate Docker containers** with CPU/memory limits
+- Evaluation uses **separate Valkey consumer groups** (`eval-workers-*`) isolated from production `agenyx-workers`
+- Evaluation API listens on **port 8006**, separate from production ports (8000, 8004, 8005, 443)
+- Evaluation PostgreSQL tables use **separate schema** (`evaluation_*`) to avoid production table contention
+- Large artifacts (traces, logs, datasets) stored in **S3-compatible storage**, not PostgreSQL

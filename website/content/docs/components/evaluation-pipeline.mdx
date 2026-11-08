@@ -1,0 +1,199 @@
+---
+title: Evaluation Pipeline
+description: End-to-end evaluation pipeline — document ingestion, provider adapters, custom scorers, and the evaluation engine for model-independent RAG and agent evaluation.
+---
+
+# Evaluation Pipeline
+
+## Objective
+
+The evaluation pipeline provides end-to-end evaluation of AI models, agents, and tools within Agenyx. It is designed to be model-independent — the same evaluation can run against any registered model/provider without code changes.
+
+## Architecture
+
+The pipeline consists of four layers:
+
+```mermaid
+graph TB
+    subgraph API [Evaluation API - Go]
+        API[REST API /api/v1/eval]
+    end
+
+    subgraph Engine [Evaluation Engine - Python]
+        ENG[Orchestration Engine]
+        PROV[Provider Adapters]
+        SCOR[Custom Scorers]
+    end
+
+    subgraph Data [Data Layer]
+        DS[Dataset Manager]
+        S3[S3-compatible Storage]
+        PG[(PostgreSQL)]
+    end
+
+    API -->|jobs| ENG
+    ENG -->|retrieve| DS
+    ENG -->|call| PROV
+    ENG -->|score| SCOR
+    ENG -->|store| PG
+    ENG -->|artifacts| S3
+    DS -->|store| S3
+    DS -->|metadata| PG
+```
+
+## Components
+
+### 1. Provider Adapters (`worker/app/eval/providers/`)
+
+Provider adapters wrap inference backends behind a unified interface. The same evaluation logic works with any provider.
+
+| Provider | Class | Endpoint | Auth |
+|----------|-------|----------|------|
+| Ollama | `OllamaProvider` | `/v1/chat/completions`, `/v1/embeddings` | None |
+| vLLM | `VLLMProvider` | `/v1/chat/completions`, `/v1/embeddings` | None |
+| OpenAI-compatible | `OpenAICompatibleProvider` | `/v1/chat/completions`, `/v1/embeddings` | Bearer token |
+| Anthropic | `AnthropicProvider` | `/v1/messages` | `x-api-key` header |
+
+Registering a new provider:
+
+```python
+from app.eval.providers.base import EvaluationProvider
+from app.eval.providers import register_provider
+
+class MyProvider(EvaluationProvider):
+    @property
+    def provider_id(self) -> str: return "my-provider"
+    @property
+    def provider_type(self) -> str: return "my-type"
+    @property
+    def endpoint_url(self) -> str: return "http://example.com/v1"
+    async def chat_completion(self, **kwargs): ...
+    async def embedding(self, **kwargs): ...
+    async def health(self) -> bool: ...
+    async def close(self): ...
+
+register_provider("my-provider", MyProvider)
+```
+
+### 2. Custom Scorers (`worker/app/eval/scorers.py`)
+
+Scorers evaluate model responses against expected outcomes, producing scores from 0.0 to 1.0.
+
+| Scorer | Name | Use Case |
+|--------|------|----------|
+| Task Completion | `task_completion` | Does the response answer the question? |
+| Answer Correctness | `answer_correctness` | Is the answer factually correct? |
+| Tool Selection Accuracy | `tool_selection_accuracy` | Did the model select the right tools? |
+| Tool Call Accuracy | `tool_call_accuracy` | Are tool call arguments correct? |
+| JSON Validity | `json_validity` | Is the response valid JSON? |
+
+Registering a new scorer:
+
+```python
+from app.eval.scorers import Scorer, register_scorer
+
+class MyScorer(Scorer):
+    @property
+    def name(self) -> str: return "my-scorer"
+    async def score(self, **kwargs) -> dict[str, Any]:
+        return {"score": 0.9, "score_unit": "percent", "details": {}}
+
+register_scorer("my-scorer", MyScorer)
+```
+
+### 3. Dataset Manager (`worker/app/eval/dataset_manager.py`)
+
+Manages dataset versioning, checksums, and S3-compatible storage. Datasets are stored as JSONL files.
+
+Example dataset record:
+```jsonl
+{"text": "What is Agenyx?", "expected": "A runtime for AI agents."}
+{"text": "How does failover work?", "expected": "Automatic provider switching."}
+```
+
+### 4. Evaluation Engine (`worker/app/eval/engine.py`)
+
+The engine orchestrates the full evaluation:
+
+1. Loads the dataset from S3
+2. Resolves provider adapters from the model registry
+3. For each model: sends prompts, collects responses, applies scorers
+4. Persists results via the Go evaluation API
+
+## End-to-End Flow
+
+```python
+from app.eval.engine import EvaluationEngine
+from app.eval.api_client import EvalAPIClient
+from app.eval.dataset_manager import DatasetManager
+
+api_client = EvalAPIClient(
+    base_url="http://evaluation-api:8006",
+    api_key="my-api-key",
+)
+dataset_manager = DatasetManager(
+    s3_endpoint="minio:9000",
+    s3_bucket="agenyx-eval",
+    s3_access_key="minioadmin",
+    s3_secret_key="minioadmin",
+)
+
+engine = EvaluationEngine(
+    api_client=api_client,
+    dataset_manager=dataset_manager,
+)
+
+# Create evaluation via API
+result = await api_client.create_evaluation(
+    name="agent-tool-use-v1",
+    dataset_id="ds-uuid",
+    evaluation_type="agent",
+    models=[
+        {"model_id": "qwen2.5:7b", "provider_id": "ollama-local"},
+        {"model_id": "llama-3.1-8b", "provider_id": "vllm-local"},
+    ],
+    scorers=["task_completion", "tool_selection_accuracy"],
+)
+
+# Run evaluation
+runs = await engine.run_evaluation(
+    evaluation=evaluation_obj,
+    models=[
+        {"model_id": "qwen2.5:7b", "provider_id": "ollama-local"},
+        {"model_id": "llama-3.1-8b", "provider_id": "vllm-local"},
+    ],
+)
+
+await engine.close()
+```
+
+## Production Deployment
+
+The evaluation worker runs as a separate Docker service:
+
+```yaml
+evaluation-worker:
+  build:
+    context: ./worker
+    dockerfile: Dockerfile
+  command: ["python", "-m", "app.eval.worker"]
+  environment:
+    AGENTYX_VALKEY_URL: redis://valkey:6379/0
+    AGENTYX_TASK_STREAM: eval:jobs
+    AGENTYX_CONSUMER_GROUP: eval-workers
+    INFERENCE_URL: http://inference:8004
+    INFERENCE_SERVICE_API_KEY: ${INFERENCE_SERVICE_API_KEY}
+```
+
+Evaluation workers are independently scalable and isolated from production workloads.
+
+## Testing
+
+Run all evaluation tests:
+
+```bash
+cd worker
+python3 -m pytest app/eval/tests/ -v
+```
+
+Current test coverage: 40 tests across provider adapters, scorers, dataset manager, ingestion processor, and evaluation engine.
