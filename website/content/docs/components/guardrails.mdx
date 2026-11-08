@@ -1,0 +1,227 @@
+---
+title: Guardrails Pipeline
+description: Pre-execution and post-generation guardrails — keyword, PII, and embedding-based jailbreak detection — running as standalone middleware before the agent/LLM.
+---
+
+# Guardrails Pipeline
+
+## Objective
+
+The guardrails pipeline is a **standalone, production-grade subsystem** that runs **pre-execution** (before the agent/LLM) and **post-generation** (before the client receives the response). It is fully separate from evaluation — guardrails do not depend on evaluation, and evaluation does not depend on guardrails.
+
+Guardrails act as a safety layer that rejects or rewrites unsafe requests before they reach inference, and sanitizes model output before it reaches the user.
+
+## Architecture
+
+```mermaid
+graph TD
+    Client((Client)) -->|TLS :443| GW[API Gateway]
+
+    subgraph MiddlewareChain [Middleware Chain]
+        CORS[CORS]
+        ReqID[Request ID]
+        SecHdr[Security Headers]
+        Size[Request Size]
+        AccessLog[Access Log]
+        RateLimit[Rate Limiter]
+        APIKey[API Key Auth]
+        AuthZ[Authorization]
+        Guardrails[Guardrails CheckInput]
+    end
+
+    subgraph Routes [Route Handlers]
+        Health[Health Endpoints]
+        Run[POST /v1/agent/run]
+        Get[GET /v1/agent/runs/{id}]
+        Auth[POST /auth/email/*]
+    end
+
+    Client --> CORS
+    CORS --> ReqID
+    ReqID --> SecHdr
+    SecHdr --> Size
+    Size --> AccessLog
+    AccessLog --> RateLimit
+    RateLimit --> APIKey
+    APIKey --> AuthZ
+    AuthZ --> Guardrails
+    Guardrails -->|block| Blocked[(403 Forbidden)]
+    Guardrails -->|allow/rewrite| Run
+    AuthZ --> Health
+    AuthZ --> Get
+    AuthZ --> Auth
+
+    Run --> ORC[Orchestrator → LLM]
+    ORC -->|output| GuardrailsOut[Guardrails CheckOutput]
+    GuardrailsOut -->|block| Blocked2[(403 Forbidden)]
+    GuardrailsOut -->|allow/rewrite| Client
+
+    classDef mw fill:#e1f5fe,stroke:#01579b;
+    classDef route fill:#fff3e0,stroke:#e65100;
+    classDef block fill:#ffebee,stroke:#b71c1c;
+
+    class CORS,ReqID,SecHdr,Size,AccessLog,RateLimit,APIKey,AuthZ,Guardrails,GuardrailsOut mw;
+    class Health,Run,Get,Auth route;
+    class Blocked,Blocked2 block;
+```
+
+## Decision Flow
+
+```
+┌─────────────────────────────────────┐
+│  CheckInput — before agent / LLM    │
+│  Providers run in parallel:         │
+│    • Keyword  (case-insensitive)    │
+│    • PII      (regex)               │
+│    • Jailbreak (embedding cosine)   │
+│  Most severe wins:                  │
+│    block > rewrite > allow          │
+│  Fail-closed → provider error = block│
+└─────────────────────────────────────┘
+        │
+        ├─ block  ───────────→ 403 Forbidden (never reaches LLM)
+        │
+        ├─ rewrite ─────────→ rewritten text → LLM
+        │
+        └─ allow ───────────→ LLM / agent generates answer
+                                       │
+                                       ▼
+                              ┌──────────────────┐
+                              │ CheckOutput      │
+                              │ (post-generation)│
+                              └──────────────────┘
+                                       │
+                                       ▼
+                              block  → 403 Forbidden (never reaches client)
+                              rewrite → sanitized answer returned
+                              allow  → answer returned to client
+```
+
+## Providers
+
+| Provider | Detection Method | Decision on Match | Package |
+|----------|-----------------|-------------------|---------|
+| `KeywordProvider` | Case-insensitive substring match | Block | `internal/guardrails` |
+| `PIIProvider` | Regex (email, SSN, phone, credit card) | Block | `internal/guardrails` |
+| `JailbreakProvider` | Cosine similarity vs reference embeddings | Block if similarity ≥ threshold | `internal/guardrails` |
+
+All providers implement the same `Provider` interface:
+
+```go
+type Provider interface {
+    Name() string
+    Check(ctx context.Context, text string, opts ...CheckOption) (Result, error)
+}
+```
+
+New providers (e.g., toxicity classifier, embedding-based jailbreak) can be added without changing the manager or service.
+
+## Decision Enum
+
+| Decision | Meaning |
+|----------|---------|
+| `allow` | Content passed all checks, can proceed |
+| `block` | Content rejected, must not reach the model/client |
+| `rewrite` | Content should be modified before being sent |
+
+## Usage
+
+### Go API
+
+```go
+import (
+    "github.com/sanchar127/agenyx/internal/guardrails"
+    "github.com/sanchar127/agenyx/internal/model_runtime"
+)
+
+embedModel := model_runtime.NewStubModel(384) // or NewRemoteClient(url, key, timeout)
+
+jailbreak, _ := guardrails.NewJailbreakProvider(
+    "jailbreak",
+    embedModel,
+    []string{
+        "ignore previous instructions",
+        "disregard all prior directions",
+        "reveal your system prompt",
+    },
+    0.85,
+    guardrails.WithEmbeddingCache(1000),
+)
+
+service := guardrails.NewService([]guardrails.Provider{
+    guardrails.NewKeywordProvider("blocked_words", []string{"ignore previous instructions"}, 0.8),
+    guardrails.NewPIIProvider("pii", map[string]string{
+        "email": `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`,
+        "ssn":   `\b\d{3}-?\d{2}-?\d{4}\b`,
+    }, 0.8),
+    jailbreak,
+}, true) // failClosed = true
+
+// Before calling the LLM / agent:
+result, err := service.CheckInput(ctx, userQuery)
+if err != nil {
+    // handle error
+}
+if guardrails.IsBlocked(result) {
+    return "I cannot answer that."
+}
+
+// After the LLM generates output (before returning to client):
+result, err = service.CheckOutput(ctx, llmAnswer)
+if guardrails.IsBlocked(result) {
+    return "I cannot answer that."
+}
+```
+
+### Gateway Middleware
+
+Guardrails are wired into the API gateway as middleware. They run **after** authentication and authorization, immediately before the `/v1/agent/run` handler.
+
+Enable via environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AGENEYX_GUARDRAILS_ENABLED` | `false` | Enable guardrails middleware |
+| `AGENEYX_GUARDRAILS_FAIL_CLOSED` | `true` | Provider errors block the request |
+| `AGENEYX_GUARDRAILS_KEYWORDS` | `ignore previous instructions,system prompt` | Comma-separated blocked keywords |
+| `AGENEYX_GUARDRAILS_THRESHOLD` | `0.8` | Keyword confidence threshold |
+| `AGENEYX_GUARDRAILS_PII_THRESHOLD` | `0.8` | PII confidence threshold |
+
+```bash
+export AGENEYX_GUARDRAILS_ENABLED=true
+export AGENEYX_GUARDRAILS_KEYWORDS="ignore previous instructions,system prompt"
+export AGENEYX_GUARDRAILS_THRESHOLD=0.8
+export AGENEYX_GUARDRAILS_FAIL_CLOSED=true
+```
+
+When enabled, requests to `POST /v1/agent/run` are scanned for blocked keywords, PII, and jailbreak signals. Blocked requests receive `403 Forbidden` with a `reason` and `rule` in the response body.
+
+## Separation from Evaluation
+
+Guardrails and evaluation are **fully separate subsystems**:
+
+| | Guardrails | Evaluation |
+|---|-----------|------------|
+| **Purpose** | Runtime safety (pre/post LLM) | Offline model evaluation |
+| **Location** | `internal/guardrails/` | `internal/eval/` + `worker/app/eval/` |
+| **Timing** | Pre-execution / post-generation | After the fact |
+| **Dependencies** | Go standard library only | Python worker, Go API |
+| **Blocks requests?** | Yes (403 Forbidden) | No |
+
+## Testing
+
+```bash
+go test ./internal/guardrails/...     # 22 tests
+go test ./internal/model_runtime/...   # 11 tests
+go test ./internal/gateway/...         # gateway + guardrails middleware tests
+go vet ./...
+go build ./...
+```
+
+## Deployment Order
+
+1. Deploy the guardrails service as middleware in the gateway
+2. Configure providers (keyword lists, PII patterns, jailbreak reference examples)
+3. Set `AGENEYX_GUARDRAILS_ENABLED=true` and tune thresholds
+4. Start with `failClosed: true` and adjust based on false positives/negatives
+5. Add embedding-based jailbreak detection later via `model_runtime` — the `Provider` interface is already ready
