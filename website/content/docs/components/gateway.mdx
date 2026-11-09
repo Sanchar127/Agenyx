@@ -34,6 +34,7 @@ graph TB
         RateLimit[Rate Limiter<br/>Token Bucket]
         APIKey[API Key Auth]
         AuthZ[Authorization<br/>Permissions]
+        Guardrails[Guardrails CheckInput<br/>pre-execution]
     end
 
     subgraph Routes [Route Handlers]
@@ -51,9 +52,10 @@ graph TB
     AccessLog --> RateLimit
     RateLimit --> APIKey
     APIKey --> AuthZ
-    AuthZ --> Health
-    AuthZ --> Run
-    AuthZ --> Get
+    AuthZ --> Guardrails
+    Guardrails --> Health
+    Guardrails --> Run
+    Guardrails --> Get
     AuthZ --> Auth
 
     Run --> ORC[Orchestrator]
@@ -95,6 +97,7 @@ Handlers are wrapped in the following order (outermost first):
 6. `RateLimiter` — token-bucket rate limiter keyed by client IP (trusted-proxy aware).
 7. `apiKeyAuthMiddleware` — Bearer token comparison for `/v1/` routes.
 8. `authorizationMiddleware` — permission enforcement for `/v1/` routes.
+9. `guardrailsMiddleware` — runs `CheckInput` on `POST /v1/agent/run` before the agent/LLM. Returns `403 Forbidden` when input is blocked by keyword, PII, or jailbreak detection. Enabled via `AGENEYX_GUARDRAILS_ENABLED=true`.
 
 ## Authentication & Permissions
 
@@ -153,6 +156,11 @@ spec:
 | `AGENEYX_TRUSTED_PROXIES` | Trusted CIDRs for client IP resolution | (none) |
 | `AGENEYX_CORS_ORIGIN` | Allowed CORS origin (`*` for any) | (none — no CORS headers) |
 | `AGENEYX_CORS_ALLOW_CREDENTIALS` | Enable `Access-Control-Allow-Credentials` | `false` |
+| `AGENEYX_GUARDRAILS_ENABLED` | Enable guardrails middleware on `/v1/agent/run` | `false` |
+| `AGENEYX_GUARDRAILS_FAIL_CLOSED` | Provider errors block the request | `true` |
+| `AGENEYX_GUARDRAILS_KEYWORDS` | Comma-separated blocked keywords | `ignore previous instructions,system prompt` |
+| `AGENEYX_GUARDRAILS_THRESHOLD` | Keyword confidence threshold | `0.8` |
+| `AGENEYX_GUARDRAILS_PII_THRESHOLD` | PII confidence threshold | `0.8` |
 
 ## Health
 
