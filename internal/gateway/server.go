@@ -270,10 +270,11 @@ func newGatewayServer(
 		writeSessionCookie(w, sessionToken, secure)
 
 		writeJSON(w, http.StatusOK, map[string]string{
-			"status":   "authenticated",
-			"provider": provider,
-			"email":    email,
-			"name":     name,
+			"status":        "authenticated",
+			"provider":      provider,
+			"email":         email,
+			"name":          name,
+			"session_token": sessionToken,
 		})
 	})
 

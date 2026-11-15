@@ -57,9 +57,18 @@ export async function GET(request: Request) {
   }
 
   // On successful token exchange, create a response that sets the session
-  // cookie and redirects to the playground.
+  // cookie and redirects to the playground. Use the session token issued by
+  // the backend (it is stored in the backend's SessionStore), not a locally
+  // generated one, otherwise the cookie would not correspond to a real session.
   const secure = process.env.NODE_ENV === 'production';
-  const sessionToken = crypto.randomUUID();
+  const sessionToken = (responseBody as { session_token?: string })?.session_token ?? '';
+
+  if (!sessionToken) {
+    redirectUrl.pathname = '/login';
+    redirectUrl.searchParams.set('error', 'oauth_no_session_token');
+
+    return NextResponse.redirect(redirectUrl);
+  }
 
   const nextResponse = NextResponse.redirect(new URL('/playground', request.url));
   setSessionCookie(nextResponse, sessionToken, secure);

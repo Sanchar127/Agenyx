@@ -33,3 +33,10 @@ func WithMetadata(k string, v any) CheckOption {
 func WithContextValue(k string, v any) CheckOption {
 	return WithMetadata(k, v)
 }
+
+// WithRAGContext passes the retrieval context to providers that need it
+// (e.g., HallucinationProvider). The context text is stored under the
+// "rag_context" metadata key and read at Check time.
+func WithRAGContext(context string) CheckOption {
+	return WithMetadata("rag_context", context)
+}

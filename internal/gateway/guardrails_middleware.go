@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,23 +10,45 @@ import (
 	"strings"
 
 	"github.com/sanchar127/agenyx/internal/guardrails"
+	"github.com/sanchar127/agenyx/internal/model_runtime"
 )
 
-// guardrailsMiddleware runs input guardrails before a request reaches the
-// agent/LLM. It only applies to agent execution routes; all other routes pass
-// through unchanged.
+// guardrailsMiddleware runs input and output guardrails around agent
+// execution requests. Input guardrails run before the agent/LLM; output
+// guardrails run on the model's response before it reaches the client.
 //
 // Configuration is read from environment variables:
 //   - AGENEYX_GUARDRAILS_ENABLED   (default: "false")
 //   - AGENEYX_GUARDRAILS_FAIL_CLOSED (default: "true")
 //   - AGENEYX_GUARDRAILS_KEYWORDS   (comma-separated blocked keywords)
 //   - AGENEYX_GUARDRAILS_THRESHOLD  (default: "0.8")
+//   - AGENEYX_GUARDRAILS_PII_THRESHOLD (default: "0.8")
+//   - AGENEYX_GUARDRAILS_HALLUCINATION_THRESHOLD (default: "0.7")
+//   - AGENEYX_GUARDRAILS_ENABLE_OUTPUT (default: "true")
 //
 // When guardrails are disabled or no providers are configured, the middleware
 // is a no-op.
 type guardrailsMiddleware struct {
-	service *guardrails.Service
-	enabled bool
+	service     *guardrails.Service
+	enabled     bool
+	checkOutput bool
+}
+
+type responseCapture struct {
+	http.ResponseWriter
+	status int
+	body   bytes.Buffer
+}
+
+func (rc *responseCapture) WriteHeader(status int) {
+	rc.status = status
+}
+
+func (rc *responseCapture) Write(data []byte) (int, error) {
+	if rc.status == 0 {
+		rc.status = http.StatusOK
+	}
+	return rc.body.Write(data)
 }
 
 func newGuardrailsMiddlewareFromEnv() (*guardrailsMiddleware, error) {
@@ -60,11 +83,22 @@ func newGuardrailsMiddlewareFromEnv() (*guardrailsMiddleware, error) {
 	}
 	providers = append(providers, pii)
 
+	// Hallucination provider (embedding-based, compares output vs context).
+	hallThreshold := parseFloatEnv("AGENEYX_GUARDRAILS_HALLUCINATION_THRESHOLD", 0.7)
+	embedModel := model_runtime.NewStubModel(384)
+	hallucination, err := guardrails.NewHallucinationProvider("hallucination", embedModel, hallThreshold, guardrails.WithHallucinationCache(1000))
+	if err != nil {
+		return nil, err
+	}
+	providers = append(providers, hallucination)
+
 	failClosed := parseBoolEnv("AGENEYX_GUARDRAILS_FAIL_CLOSED", true)
+	checkOutput := parseBoolEnv("AGENEYX_GUARDRAILS_ENABLE_OUTPUT", true)
 
 	return &guardrailsMiddleware{
-		service: guardrails.NewService(providers, failClosed),
-		enabled: true,
+		service:     guardrails.NewService(providers, failClosed),
+		enabled:     true,
+		checkOutput: checkOutput,
 	}, nil
 }
 
@@ -81,50 +115,84 @@ func (m *guardrailsMiddleware) handle(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Only guard agent execution requests with a body.
-		if !isExecutionRoute(r) || r.Body == nil {
-			next.ServeHTTP(w, r)
-			return
+		// ---------- INPUT GUARDRAILS (before agent / LLM) ----------
+		if isExecutionRoute(r) && r.Body != nil {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{
+					"error": "failed to read request body",
+				})
+				return
+			}
+
+			// Extract the user query from common JSON shapes.
+			query := extractQuery(body)
+			if query != "" {
+				result, err := m.service.CheckInput(r.Context(), query)
+				if err != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]string{
+						"error": "guardrail check failed",
+					})
+					return
+				}
+
+				if guardrails.IsBlocked(result) {
+					writeJSON(w, http.StatusForbidden, map[string]string{
+						"error":    "request blocked by guardrails",
+						"reason":   result.Reason,
+						"rule":     result.Rule,
+						"decision": string(result.Decision),
+					})
+					return
+				}
+			}
+
+			// Restore the body for downstream handlers.
+			r.Body = io.NopCloser(strings.NewReader(string(body)))
 		}
 
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "failed to read request body",
-			})
-			return
+		// ---------- OUTPUT GUARDRAILS (after agent / LLM, before client) ----------
+		recorder := &responseCapture{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
+
+		if m.checkOutput && isExecutionRoute(r) {
+			contextText := extractRAGContext(r)
+			outputText := recorder.body.String()
+
+			result, err := m.service.CheckOutput(
+				r.Context(),
+				outputText,
+				guardrails.WithRAGContext(contextText),
+			)
+			if err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{
+					"error": "output guardrail check failed",
+				})
+				return
+			}
+
+			if guardrails.IsBlocked(result) {
+				// Override the handler's response with a block.
+				w.WriteHeader(http.StatusForbidden)
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error":    "output blocked by guardrails",
+					"reason":   result.Reason,
+					"rule":     result.Rule,
+					"decision": string(result.Decision),
+				})
+				return
+			}
 		}
 
-		// Extract the user query from common JSON shapes:
-		//   {"query": "..."}   or   {"input": "..."}   or   {"text": "..."}
-		query := extractQuery(body)
-		if query == "" {
-			// No user-facing text to guard; pass through.
-			next.ServeHTTP(w, r)
-			return
+		// Pass the captured response through to the client.
+		for k, v := range recorder.Header() {
+			w.Header()[k] = v
 		}
-
-		result, err := m.service.CheckInput(r.Context(), query)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "guardrail check failed",
-			})
-			return
+		if recorder.status == 0 {
+			recorder.status = http.StatusOK
 		}
-
-		if guardrails.IsBlocked(result) {
-			writeJSON(w, http.StatusForbidden, map[string]string{
-				"error":    "request blocked by guardrails",
-				"reason":   result.Reason,
-				"rule":     result.Rule,
-				"decision": string(result.Decision),
-			})
-			return
-		}
-
-		// Restore the body for downstream handlers.
-		r.Body = io.NopCloser(strings.NewReader(string(body)))
-		next.ServeHTTP(w, r)
+		w.WriteHeader(recorder.status)
+		_, _ = w.Write(recorder.body.Bytes())
 	})
 }
 
@@ -140,6 +208,16 @@ func extractQuery(body []byte) string {
 				return s
 			}
 		}
+	}
+	return ""
+}
+
+// extractRAGContext pulls the retrieval context from a request header or JSON
+// body field so the hallucination provider can compare the output against it.
+func extractRAGContext(r *http.Request) string {
+	// Prefer the explicit header.
+	if v := r.Header.Get("X-RAG-Context"); v != "" {
+		return v
 	}
 	return ""
 }
