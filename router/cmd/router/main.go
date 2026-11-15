@@ -216,19 +216,11 @@ func buildRouter(valkeyClient *redis.Client) (router.Router, error) {
 
 	models := []router.Model{
 		{
-			Name:          "qwen2.5:7b",
+			Name:          "llama3.2:3b",
 			Provider:      "ollama",
 			Capabilities:  []string{"general", "coding"},
-			ContextWindow: 32768,
-			Priority:      10,
-			Enabled:       true,
-		},
-		{
-			Name:          "llama3.2",
-			Provider:      "ollama",
-			Capabilities:  []string{"general"},
 			ContextWindow: 8192,
-			Priority:      5,
+			Priority:      10,
 			Enabled:       true,
 		},
 	}

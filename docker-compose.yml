@@ -101,25 +101,14 @@ services:
 
     container_name: agenyx-sandbox
 
-    runtime: runsc
+    environment:
+      SANDBOX_ADDR: :9000
 
     expose:
       - "9000"
 
-    read_only: true
-
-    cap_drop:
-      - ALL
-
-    security_opt:
-      - no-new-privileges:true
-
-    mem_limit: 256m
-    cpus: "0.5"
-    pids_limit: 64
-
-    tmpfs:
-      - /tmp:size=16m,mode=1777
+    ports:
+      - "9000:9000"
 
     restart: unless-stopped
 
@@ -349,10 +338,11 @@ services:
       context: ./website
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_AGENYX_API_URL: ${NEXT_PUBLIC_AGENYX_API_URL:-https://localhost:8443}
+        NEXT_PUBLIC_AGENYX_API_URL: ${NEXT_PUBLIC_AGENYX_API_URL:-https://gateway:443}
         NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
         NEXT_PUBLIC_GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
         NEXT_PUBLIC_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+        NEXT_PUBLIC_AGENYX_API_KEY: ${AGENEYX_API_KEY:-}
 
     container_name: agenyx-website
 
