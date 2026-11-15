@@ -6,7 +6,7 @@ import {
   BrainCircuit,
   Bot,
   Cpu,
-  Document,
+  Dome,
   FlaskConical,
   Sparkles,
   Telescope,
@@ -38,7 +38,7 @@ const RAG_DASHBOARD: PlaygroundToolDefinition = {
   id: 'rag-dashboard',
   name: 'RAG Pipeline',
   description: 'Retrieval-Augmented Generation pipeline',
-  icon: Document,
+  icon: Dome,
   component: RagDashboard,
 };
 

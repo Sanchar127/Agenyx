@@ -11,7 +11,7 @@ import {
   Bot,
   Check,
   Copy,
-  Document,
+  Dome,
   Globe,
   RefreshCw,
   Search,
@@ -152,7 +152,7 @@ export function RagDocumentUpload() {
   return (
     <div className='space-y-4'>
       <div className='flex items-center gap-2 mb-4'>
-        <Document className='h-5 w-5' />
+        <Dome className='h-5 w-5' />
         <h3 className='text-sm font-semibold text-fd-foreground'>Upload Document</h3>
       </div>
 
@@ -226,7 +226,7 @@ export function RagDocumentUpload() {
 
       {documents.length > 0 && (
         <div className='mt-4 border-t border-fd-border pt-4'>
-          <h4 className='text-xs font-semibold text-fd-muted-foreground uppercase tracking-wider'>Stored Documents ({documents.length})</h3>
+          <h4 className='text-xs font-semibold text-fd-muted-foreground uppercase tracking-wider'>Stored Documents ({documents.length})</h4>
           <div className='flex gap-2 overflow-x-auto px-1 mt-2'>
             {documents.map((doc) => (
               <button
@@ -411,10 +411,10 @@ export function RagDashboard() {
       </div>
       <div className='flex flex-col gap-4'>
         <div className='flex flex-col lg:flex-row gap-4'>
-          <RagChatPanel className='flex-1' />
+          <RagChatPanel />
           <div className='flex flex-col gap-4 w-full lg:w-1/3'>
             <RagSystemStats />
-            <RagDocumentUpload className='flex-1' />
+            <RagDocumentUpload />
           </div>
         </div>
       </div>
