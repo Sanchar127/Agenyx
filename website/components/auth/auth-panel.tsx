@@ -5,6 +5,7 @@ import { CredentialsForm } from '@/components/auth/credentials-form';
 interface AuthPanelProps {
   mode: 'login' | 'signup';
   error?: string;
+  message?: string;
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
@@ -13,14 +14,14 @@ const ERROR_MESSAGES: Record<string, string> = {
     'We could not complete the sign-in. Please try again.',
 };
 
-export function AuthPanel({ mode, error }: AuthPanelProps) {
+export function AuthPanel({ mode, error, message }: AuthPanelProps) {
   const isLogin = mode === 'login';
   const title = isLogin ? 'Sign in to Agenyx' : 'Create your Agenyx account';
   const description = isLogin
     ? 'Access the AI agent runtime, API keys, and playgrounds.'
     : 'Start building with the Agenyx agent orchestration runtime.';
 
-  const errorMessage = error ? ERROR_MESSAGES[error] : undefined;
+  const errorMessage = message ?? (error ? ERROR_MESSAGES[error] : undefined);
 
   return (
     <section className='flex min-h-screen items-center justify-center px-4 py-16'>

@@ -3,9 +3,9 @@ import { AuthPanel } from '@/components/auth/auth-panel';
 export default async function SignupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; message?: string }>;
 }) {
-  const { error } = await searchParams;
+  const { error, message } = await searchParams;
 
-  return <AuthPanel mode='signup' error={error} />;
+  return <AuthPanel mode='signup' error={error} message={message} />;
 }

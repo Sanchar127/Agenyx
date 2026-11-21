@@ -50,8 +50,22 @@ export async function GET(request: Request) {
   const redirectUrl = new URL('/', request.url);
 
   if (exchangeFailed) {
+    let backendMessage = '';
+    if (
+      responseBody &&
+      typeof responseBody === 'object' &&
+      'error' in responseBody
+    ) {
+      backendMessage = String(
+        (responseBody as { error?: unknown }).error ?? '',
+      );
+    }
+
     redirectUrl.pathname = '/login';
     redirectUrl.searchParams.set('error', 'oauth_exchange_failed');
+    if (backendMessage) {
+      redirectUrl.searchParams.set('message', backendMessage);
+    }
 
     return NextResponse.redirect(redirectUrl);
   }
