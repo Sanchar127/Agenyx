@@ -187,6 +187,7 @@ func exchangeCode(providerName, code, redirectURI string) (*oauthTokenResponse, 
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "agenyx-gateway/1.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -238,6 +239,7 @@ func fetchUserInfo(providerName, accessToken string) (subject, email, name strin
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "agenyx-gateway/1.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

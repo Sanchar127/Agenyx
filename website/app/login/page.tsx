@@ -3,9 +3,9 @@ import { AuthPanel } from '@/components/auth/auth-panel';
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; message?: string }>;
 }) {
-  const { error } = await searchParams;
+  const { error, message } = await searchParams;
 
-  return <AuthPanel mode='login' error={error} />;
+  return <AuthPanel mode='login' error={error} message={message} />;
 }
